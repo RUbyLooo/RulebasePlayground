@@ -66,7 +66,7 @@ def main():
     print("planning fail count:",env.count)
     print("ik fail count:", env.count_ik)
 
-    env.mjstep_thread.join()
+    # env.mjstep_thread.join()
 
 
 if __name__ == "__main__":

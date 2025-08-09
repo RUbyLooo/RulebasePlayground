@@ -211,6 +211,53 @@ class BaseViewer:
 
         return T_total
 
+    # def rotation_matrix_to_euler(self, R):
+    #     """
+    #         从旋转矩阵计算欧拉角(ZYZ顺序)
+    #         phi： joint4    range="-1.832 1.832"
+    #         theta: joint5  range="-1.22 1.22"
+    #         psi: joint6    range="-3.14 3.14"
+    #     """
+    #     sin_theta = sqrt(R[2, 0] ** 2 + R[2, 1] ** 2)
+    #     singular = sin_theta < 1e-6
+    #
+    #     if not singular:
+    #         # theta = atan2(sin_theta, R[2, 2])
+    #         theta = asin(R[0, 2])
+    #         # theta = acos(R[0, 0] / R[0, 1])
+    #         # phi = atan2(R[1, 2] / sin(theta), R[0, 2] / sin(theta))
+    #         phi = 0
+    #         # psi = atan2(R[2, 1] / sin(theta), -R[2, 0] / sin(theta))
+    #         psi = atan2(R[1, 0],R[1, 1])
+    #         # print("phi, theta, psi",[phi, theta, psi])
+    #         if ((phi > -1.832 and phi < 1.832) and (theta > -1.225 and theta < 1.225)
+    #         and (psi > -3.14 and psi < 3.14)):
+    #             self.phi = phi
+    #             return np.array([phi, theta, psi])
+    #         #
+    #         # theta2 = -theta
+    #         # # phi2 = atan2(R[1, 2] / sin(theta2), R[0, 2] / sin(theta2))
+    #         # phi2 = 0
+    #         # # psi2 = atan2(R[2, 1] / sin(theta2), -R[2, 0] / sin(theta2))
+    #         # psi2 = atan2(R[1, 0], R[1, 1])
+    #         # # print("phi2, theta2, psi2",[phi2, theta2, psi2])
+    #         # if ((phi2 > -1.832 and phi2 < 1.832) and (theta2 > -1.22 and theta2 < 1.22)
+    #         # and (psi2 > -3.14 and psi2 < 3.14)):
+    #         #     self.phi = phi2
+    #         #     return np.array([phi2, theta2, psi2])
+    #         else:
+    #             return None
+    #
+    #     else:
+    #         theta = 0
+    #         phi = self.phi
+    #         psi = atan2(-R[0, 1], R[0, 0])
+    #         if ((phi > -1.832 and phi < 1.832) and (theta > -1.22 and theta < 1.22)
+    #                 and (psi > -3.14 and psi < 3.14)):
+    #             self.phi = phi
+    #             return np.array([phi, theta, psi])
+    #         else:
+    #             return None
     def rotation_matrix_to_euler(self, R):
         """
             从旋转矩阵计算欧拉角(ZYZ顺序)
@@ -218,46 +265,55 @@ class BaseViewer:
             theta: joint5  range="-1.22 1.22"
             psi: joint6    range="-3.14 3.14"
         """
-        sin_theta = sqrt(R[2, 0] ** 2 + R[2, 1] ** 2)
-        singular = sin_theta < 1e-6
-
-        if not singular:
-            # theta = atan2(sin_theta, R[2, 2])
-            theta = asin(R[0, 2])
-            # theta = acos(R[0, 0] / R[0, 1])
-            # phi = atan2(R[1, 2] / sin(theta), R[0, 2] / sin(theta))
-            phi = 0
-            # psi = atan2(R[2, 1] / sin(theta), -R[2, 0] / sin(theta))
-            psi = atan2(R[1, 0],R[1, 1])
-            # print("phi, theta, psi",[phi, theta, psi])
-            if ((phi > -1.832 and phi < 1.832) and (theta > -1.22 and theta < 1.22)
+        psi = 0
+        phi = atan2(-R[0, 1], R[1, 1])
+        theta = atan2(-R[2, 0], R[2, 2])
+        if ((phi > -1.832 and phi < 1.832) and (theta > -1.225 and theta < 1.225)
             and (psi > -3.14 and psi < 3.14)):
-                self.phi = phi
-                return np.array([phi, theta, psi])
-            #
-            # theta2 = -theta
-            # # phi2 = atan2(R[1, 2] / sin(theta2), R[0, 2] / sin(theta2))
-            # phi2 = 0
-            # # psi2 = atan2(R[2, 1] / sin(theta2), -R[2, 0] / sin(theta2))
-            # psi2 = atan2(R[1, 0], R[1, 1])
-            # # print("phi2, theta2, psi2",[phi2, theta2, psi2])
-            # if ((phi2 > -1.832 and phi2 < 1.832) and (theta2 > -1.22 and theta2 < 1.22)
-            # and (psi2 > -3.14 and psi2 < 3.14)):
-            #     self.phi = phi2
-            #     return np.array([phi2, theta2, psi2])
-            else:
-                return None
-
+            return np.array([phi, theta, psi])
         else:
-            theta = 0
-            phi = self.phi
-            psi = atan2(-R[0, 1], R[0, 0])
-            if ((phi > -1.832 and phi < 1.832) and (theta > -1.22 and theta < 1.22)
-                    and (psi > -3.14 and psi < 3.14)):
-                self.phi = phi
-                return np.array([phi, theta, psi])
-            else:
-                return None
+            return None
+
+        # sin_theta = sqrt(R[2, 0] ** 2 + R[2, 1] ** 2)
+        # singular = sin_theta < 1e-6
+        #
+        # if not singular:
+        #     # theta = atan2(sin_theta, R[2, 2])
+        #     theta = asin(R[0, 2])
+        #     # theta = acos(R[0, 0] / R[0, 1])
+        #     # phi = atan2(R[1, 2] / sin(theta), R[0, 2] / sin(theta))
+        #     phi = 0
+        #     # psi = atan2(R[2, 1] / sin(theta), -R[2, 0] / sin(theta))
+        #     psi = atan2(R[1, 0],R[1, 1])
+        #     # print("phi, theta, psi",[phi, theta, psi])
+        #     if ((phi > -1.832 and phi < 1.832) and (theta > -1.225 and theta < 1.225)
+        #     and (psi > -3.14 and psi < 3.14)):
+        #         self.phi = phi
+        #         return np.array([phi, theta, psi])
+        #     #
+        #     # theta2 = -theta
+        #     # # phi2 = atan2(R[1, 2] / sin(theta2), R[0, 2] / sin(theta2))
+        #     # phi2 = 0
+        #     # # psi2 = atan2(R[2, 1] / sin(theta2), -R[2, 0] / sin(theta2))
+        #     # psi2 = atan2(R[1, 0], R[1, 1])
+        #     # # print("phi2, theta2, psi2",[phi2, theta2, psi2])
+        #     # if ((phi2 > -1.832 and phi2 < 1.832) and (theta2 > -1.22 and theta2 < 1.22)
+        #     # and (psi2 > -3.14 and psi2 < 3.14)):
+        #     #     self.phi = phi2
+        #     #     return np.array([phi2, theta2, psi2])
+        #     else:
+        #         return None
+        #
+        # else:
+        #     theta = 0
+        #     phi = self.phi
+        #     psi = atan2(-R[0, 1], R[0, 0])
+        #     if ((phi > -1.832 and phi < 1.832) and (theta > -1.22 and theta < 1.22)
+        #             and (psi > -3.14 and psi < 3.14)):
+        #         self.phi = phi
+        #         return np.array([phi, theta, psi])
+        #     else:
+        #         return None
 
     def rotation_matrix_to_quaternion(self,R):
         """将3x3旋转矩阵转换为四元数(w, x, y, z顺序)"""
@@ -295,6 +351,99 @@ class BaseViewer:
         transform = self.dh_transform(self.alpha[joint_idx], self.a[joint_idx], self.d[joint_idx], self.theta_offset[joint_idx] + angle)
         return transform
 
+    # def inverse_kinematics(self, T_base_target):
+    #     """Pieper解法逆运动学求解"""
+    #     # 计算 joint4 位置
+    #     p_target_joint4 = np.array([0, 0, -self.l, 1], dtype=float)
+    #     p_base_joint4 = T_base_target @ p_target_joint4
+    #     px, py, pz = p_base_joint4[0], p_base_joint4[1], p_base_joint4[2]
+    #
+    #     # 计算 link1 2 3 角度
+    #     theta1 = atan2(py, px)
+    #     if (theta1 == PI):
+    #         theta1 = 0
+    #         self.theta1 = theta1
+    #     else:
+    #         # TODO
+    #         theta1 = self.theta1
+    #         # print("no ik solution, fail theta 1")
+    #         # return None
+    #
+    #     T01 = self.dh_transform(self.alpha[0], self.a[0], self.d[0], theta1)
+    #
+    #     # Convert P05 to frame 1
+    #     P15 = np.linalg.inv(T01) @ np.array([px, py, pz, 1])
+    #     x1, z1 = P15[0], P15[2]
+    #     a1, a2 = self.a[2], self.a[3]
+    #     d1, d2 = self.d[2], self.d[3]
+    #     l1 = sqrt(a1 ** 2 + d1 ** 2)
+    #     l2 = sqrt(a2 ** 2 + d2 ** 2)
+    #     l3 = sqrt(x1 ** 2 + z1 ** 2)
+    #
+    #     cos_phi3 = (l1 ** 2 + l2 ** 2 - l3 ** 2) / (2.0 * l1 * l2)
+    #     if abs(cos_phi3) > 1:
+    #         print("no ik solution, fail theta 3")
+    #         # self.count_ik = self.count_ik + 1
+    #         return None
+    #     phi3 = acos(cos_phi3)
+    #     # print("phi3 is ", phi3 / PI * 180)
+    #
+    #     phi3 = atan2(sqrt(1 - cos_phi3 ** 2), cos_phi3)
+    #     # print("phi3 is ", phi3 / PI * 180)
+    #     gamma = atan2(abs(self.d[3]), abs(self.a[3]))
+    #     # print("gamma is ", gamma / PI * 180)
+    #     theta3 = -(gamma + phi3) - self.theta_offset[2]
+    #
+    #     if (theta3 > 2 or theta3 < -2.967):
+    #         print("no ik solution, fail theta 3")
+    #         return None
+    #
+    #     cos_phi2 = (l1 ** 2 + l3 ** 2 - l2 ** 2) / (2 * l1 * l3)
+    #     if abs(cos_phi2) > 1:
+    #         print("no ik solution, fail theta 2")
+    #     phi2 = acos(cos_phi2)
+    #
+    #     beta = atan(x1 / z1)
+    #     if z1 > 0:
+    #         theta2 = - (PI / 2 + phi2 - beta) - self.theta_offset[1]
+    #     else:
+    #         beta = atan(x1 / abs(z1))
+    #         # print("phi2", phi2 / 3.14 * 180)
+    #         # print("beta", beta / 3.14 * 180)
+    #         theta2 = - (phi2 - (PI / 2 - beta)) - self.theta_offset[1]
+    #
+    #     if (theta2 > 3.14 or theta2 < -2):
+    #         print("no ik solution, fail theta 2")
+    #         return None
+    #
+    #     q_sol = [theta1, theta2, theta3, 0, 0, 0]
+    #
+    #     # 计算link4 5 6 角度
+    #     T03 = self.forward_kinematics_sub(q_sol, 3)
+    #     R03 = T03[0:3, 0:3]
+    #     R34d = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    #     T34d = np.array([[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
+    #     R03d = R03 @ R34d
+    #     R06 = T_base_target[0:3, 0:3]
+    #     R36 = R03d.T @ R06
+    #
+    #     # print("needed R36", R36)
+    #     if self.rotation_matrix_to_euler(R36) is None:
+    #         print("no ik solution, fail joint 4,5,6")
+    #         # self.count_ik = self.count_ik + 1
+    #         return None
+    #     # 判断ry是否为0
+    #     rx, ry, rz = self.rotation_matrix_to_euler(R36)
+    #
+    #     q_sol = [theta1, theta2, theta3, rx, ry, rz]
+    #     T34 = self.get_joint_tf(3, rx)
+    #     T45 = self.get_joint_tf(4, ry)
+    #     T56 = self.get_joint_tf(5, rz)
+    #     T36 = T34d.T @ (T34 @ T45) @ T56
+    #     # print("REAL T36", T36)
+    #
+    #     return q_sol
+
     def inverse_kinematics(self, T_base_target):
         """Pieper解法逆运动学求解"""
         # 计算 joint4 位置
@@ -302,16 +451,15 @@ class BaseViewer:
         p_base_joint4 = T_base_target @ p_target_joint4
         px, py, pz = p_base_joint4[0], p_base_joint4[1], p_base_joint4[2]
 
-        # 计算 link1 2 3 角度
-        theta1 = atan2(py, px)
-        if (theta1 == PI):
-            theta1 = 0
-            self.theta1 = theta1
+        if px > 0:
+            # 计算 link1 2 3 角度
+            theta1 = atan2(py, px)
         else:
-            # TODO
-            theta1 = self.theta1
-            # print("no ik solution, fail theta 1")
-            # return None
+            if py > 0:
+                theta1 = -PI + atan2(py, px)
+            else:
+                theta1 = PI + atan2(py, px)
+            # theta1 = PI - atan2(py, px)
 
         T01 = self.dh_transform(self.alpha[0], self.a[0], self.d[0], theta1)
 
