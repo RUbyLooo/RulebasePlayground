@@ -35,101 +35,50 @@ import logging
 logger = logging.getLogger(__name__)
 
 from scipy.signal import savgol_filter
+
+
 class BaseViewer:
     """
-    参数解释：
-        cfg.path：路径或文件名，通常是模型文件或场景文件路径。
-        3：一般表示自由度（DOF）数量或维度，可能指 3D 空间。
-        azimuth=180：方位角（水平旋转角度），单位为度，设置为 180°。
-        elevation=-30：俯仰角（垂直旋转角度），单位为度，设置为 -30°（向下倾斜）。
+    双臂机械臂仿真环境类
+    支持双臂协调控制，物体抓取和放置任务
     """
+    
     def __init__(self, cfg, distance=3, azimuth=0, elevation=-30):
-        print(f"model_path : {cfg.path}")
+        print(f"Model path: {cfg.path}")
         self.model = mujoco.MjModel.from_xml_path(cfg.path)
-
-        # 初始化上下文、场景等渲染资源
         self.data = mujoco.MjData(self.model)
+        
+        # 相机参数
         self.distance = distance
         self.azimuth = azimuth
         self.elevation = elevation
-
-        # 开一个物理引擎的线程
+        
+        # 初始化MuJoCo viewer
         self.handle = mujoco.viewer.launch_passive(self.model, self.data)
         self.handle.cam.distance = distance
         self.handle.cam.azimuth = azimuth
         self.handle.cam.elevation = elevation
         self.opt = mujoco.MjvOption()
-
-        # ✅ 正确使用 glfw（模块调用，不加 self.）
-        glfw.init()
-        glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
-        self.window = glfw.create_window(640, 480, "offscreen", None, None)
-        glfw.make_context_current(self.window)
-
-        # mujoco 相机数据相关
-        self.camera = mujoco.MjvCamera()
-        self.camera.type = mujoco.mjtCamera.mjCAMERA_FIXED 
-        self.scene = mujoco.MjvScene(self.model, maxgeom=1000)
-        self.context = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
-        mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
-
-        self.camera_pos = np.array([0, 0, 0])
-        self.camera_mat = np.eye(3, dtype=np.float64)
-        self.cur_episode_done = False
-
-        # 加载机械臂相关代码
-        self.target_position = np.array([0, 0, 0])
-        self.target_quat_wxyz = np.array([0, 0, 0, 0])
-        self.target_quat_xyzw = np.roll(self.target_quat_wxyz, -1)
-        self.item_name = "apple"
-        # self.item_name = "banana"
-
-        # 用一个全局变量保存目标位姿，方便随时取用
-        self.target_position, self.target_quat_wxyz = self._get_body_pose(self.item_name)
-        # 针对banana
-        if self.item_name == "banana":
-            # 重新计算位置
-            self.target_position += np.array([0, 0, -0.02])
-            # 重新计算姿态
-            # 先获得baselink的世界坐标
-        # self.target_position += np.array([0, 0, 0.005])
-        self.target_quat_xyzw = np.roll(self.target_quat_wxyz, -1)
-
-        # 保存目标初始化半径
-        self.rho = 0.0
-
-        # 统计planning和ik失败率
-        self.count = 0
-        self.count_ik = 0
-
-        self.path = cfg.path
-
-        if (cfg["is_have_arm"] == True):
-            self.my_chain = ikpy.chain.Chain.from_urdf_file("/home/ubuntu/piper_rrt_cubic/assets/piper_n.urdf")
-            # 创建机械臂规划模型
-            self.model_roboplan, self.collision_model, visual_model = load_models(use_sphere_collisions=True)
-            if self.collision_model is None:
-                raise ValueError("collision_model is None — collision model must be loaded before proceeding.")
-
-            add_self_collisions(self.model_roboplan, self.collision_model)
-            add_object_collisions(self.model_roboplan, self.collision_model, visual_model, inflation_radius=0.1)
-            self.target_frame = "link6"
-            np.set_printoptions(precision=3)
-            self.distance_padding = 0.001
-            self.index = 0
-            self.l = 0.091 + 0.053  # joint4 → joint6 → 末端执行器
-            # DH参数定义（单位：米/弧度）
-            self.alpha = [0, -pi / 2, 0, pi / 2, -pi / 2, pi / 2]  # 扭转角
-            self.a = [0, 0, 0.28503, -0.02198, 0, 0]  # 连杆长度
-            self.d = [0.123, 0, 0, 0.25075, 0, 0.091]  # 连杆偏移
-            self.theta_offset = [0, -172.2135102 * pi / 180, -102.7827493 * pi / 180, 0, 0, 0]  # 初始角度偏移
-
+        
+        # 初始化离屏渲染
+        self._init_offscreen_rendering()
+        
+        # 初始化双臂配置
+        self._init_dual_arm_config(cfg)
+        
+        # 保存初始状态
         self.init_qpos = self.data.qpos.ravel().copy()
         self.init_qvel = self.data.qvel.ravel().copy()
 
-        self.episode_len = cfg["episode_len"]
-        self.is_save_record_data = cfg["is_save_record_data"]
-        self.camera_names = cfg["camera_names"]
+        self.left_place_q = np.array([-0.262, 1.24, -0.728, 0.0, 0.0, 0.0])
+        self.right_place_q = np.array([0.262, 1.24, -0.728, 0.0, 0.0, 0.0])
+        
+        # 任务相关参数
+        self.episode_len = cfg.get("episode_len", 1000)
+        self.is_save_record_data = cfg.get("is_save_record_data", False)
+        self.camera_names = cfg.get("camera_names", ["wrist_cam"])
+        
+        # 数据记录
         self.data_dict = {
             'observations': {
                 'images': {cam_name: [] for cam_name in self.camera_names},
@@ -137,43 +86,116 @@ class BaseViewer:
                 'actions': []
             }
         }
+        
         self.step_number = 0
         self.goal_reached_count = 0
-
-        # motor映射
-        # 创建 motor 映射
-        self.motors = {
-            "joint_1.pos": 0.0,
-            "joint_2.pos": 0.0,
-            "joint_3.pos": 0.0,
-            "joint_4.pos": 0.0,
-            "joint_5.pos": 0.0,
-            "joint_6.pos": 0.0,
-            "gripper.pos": 0.0,
-        }
+        self.cur_episode_done = False
+        
+        # 双臂motor映射
+        self._init_motor_mapping()
+        
+        # 状态队列
         self.sim_state_queue = queue.Queue(maxsize=1)
-
-        self.mjstep_thread = threading.Thread(target=self.mujoco_step)
-        # self.mjstep_thread.start()
-
-
+        
+        # 物体和目标配置
+        self.apple_name = "apple"
+        self.banana_name = "banana"
+        # 这里可能是 "board" 或 "desk"，统一用函数取
+        self.board_candidates = ["board", "desk", "tray", "basket"]
+        
+        # 抓取位姿存储 - 这里您需要提供实际的抓取位姿数据（或在模型里放置 xxx_grasp_site）
+        self.grasp_poses = {
+            "apple": {"position": None, "quaternion": None},   # 如果你要手填，给数组即可
+            "banana": {"position": None, "quaternion": None}
+        }
+        
+        # 统计信息
+        self.count = 0
+        self.count_ik = 0
         self.phi = 0
+        
 
+        self._cache_mobile_base_handles()
 
-        # 打印当前场景 joint 和 body 信息
+        # 打印场景信息
         self.print_all_joint_info()
         self.print_all_body_info()
 
-    # -------------------------平滑处理-------------------------
-    # 定义平滑函数（使用移动平均法或更高级的Savitzky-Golay滤波器）
-    def smooth_waveform(self,waveform, window_size=51):
-        # 确保窗口大小是奇数
-        window_size = window_size if window_size % 2 != 0 else window_size + 1
-        # 使用Savitzky-Golay滤波器进行平滑
-        return savgol_filter(waveform, window_length=window_size, polyorder=2)
+    # ------------ 传感器读取 ------------
+    def _get_arm_joint_positions(self, arm: str, n_joints: int) -> np.ndarray:
+        vals = []
+        for i in range(1, n_joints + 1):
+            name = f"{arm}_joint{i}_pos"
+            v = self._get_sensor_data(name)  # 期望 dim=1
+            vals.append(float(v[0]) if v.size == 1 else float(v.squeeze()))
+        return np.asarray(vals, dtype=float)
 
-    # ------------------------正逆运动学------------------------
-
+    def _get_sensor_data(self, sensor_name: str):
+        sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, sensor_name)
+        if sensor_id == -1:
+            raise ValueError(f"Sensor '{sensor_name}' not found in model!")
+        start_idx = self.model.sensor_adr[sensor_id]
+        dim = self.model.sensor_dim[sensor_id]
+        sensor_values = self.data.sensordata[start_idx : start_idx + dim]
+        return sensor_values
+        
+    # ------------ 渲染 ------------
+    def _init_offscreen_rendering(self):
+        glfw.init()
+        glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
+        self.window = glfw.create_window(640, 480, "offscreen", None, None)
+        glfw.make_context_current(self.window)
+        
+        self.camera = mujoco.MjvCamera()
+        self.camera.type = mujoco.mjtCamera.mjCAMERA_FIXED
+        self.scene = mujoco.MjvScene(self.model, maxgeom=1000)
+        self.context = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
+        mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
+        
+        self.camera_pos = np.array([0, 0, 0])
+        self.camera_mat = np.eye(3, dtype=np.float64)
+        
+    # ------------ 机械臂/模型配置 ------------
+    def _init_dual_arm_config(self, cfg):
+        if cfg.get("is_have_arm", False):
+            self.model_roboplan, self.collision_model, visual_model = load_models(use_sphere_collisions=True)
+            if self.collision_model is None:
+                raise ValueError("collision_model is None — collision model must be loaded before proceeding.")
+            
+            add_self_collisions(self.model_roboplan, self.collision_model)
+            add_object_collisions(self.model_roboplan, self.collision_model, visual_model, inflation_radius=0.1)
+            
+            np.set_printoptions(precision=3)
+            self.distance_padding = 0.001
+            self.l = 0.091 + 0.053  # joint4 → joint6 → 末端执行器
+            
+            # DH参数定义（单位：米/弧度）
+            self.alpha = [0, -pi/2, 0, pi/2, -pi/2, pi/2]  # 扭转角
+            self.a = [0, 0, 0.28503, -0.02198, 0, 0]  # 连杆长度
+            self.d = [0.123, 0, 0, 0.25075, 0, 0.091]  # 连杆偏移
+            self.theta_offset = [0, -172.2135102*pi/180, -102.7827493*pi/180, 0, 0, 0]
+    
+    def _init_motor_mapping(self):
+        self.left_motors = {
+            "left_joint_1.pos": 0.0,
+            "left_joint_2.pos": 0.0,
+            "left_joint_3.pos": 0.0,
+            "left_joint_4.pos": 0.0,
+            "left_joint_5.pos": 0.0,
+            "left_joint_6.pos": 0.0,
+            "left_gripper.pos": 0.0,
+        }
+        self.right_motors = {
+            "right_joint_1.pos": 0.0,
+            "right_joint_2.pos": 0.0,
+            "right_joint_3.pos": 0.0,
+            "right_joint_4.pos": 0.0,
+            "right_joint_5.pos": 0.0,
+            "right_joint_6.pos": 0.0,
+            "right_gripper.pos": 0.0,
+        }
+    
+    # ========================= 运动学相关 =========================
     def dh_transform(self, alpha, a, d, theta):
         """
         计算Denavit-Hartenberg标准参数的4x4齐次变换矩阵
@@ -200,17 +222,14 @@ class BaseViewer:
             [0, 0, 0, 1]
         ])
         return transform
-
+    
     def forward_kinematics_sub(self, joints, end):
-        # 0_T_end
         T_total = np.eye(4)
         for i in range(end):
-            # print("i alpha a d theta", self.alpha[i], self.a[i], self.d[i], self.theta_offset[i])
             T = self.dh_transform(self.alpha[i], self.a[i], self.d[i], self.theta_offset[i] + joints[i])
             T_total = T_total @ T
-
         return T_total
-
+    
     def rotation_matrix_to_euler(self, R):
         """
             从旋转矩阵计算欧拉角(ZYZ顺序)
@@ -218,52 +237,17 @@ class BaseViewer:
             theta: joint5  range="-1.22 1.22"
             psi: joint6    range="-3.14 3.14"
         """
-        sin_theta = sqrt(R[2, 0] ** 2 + R[2, 1] ** 2)
-        singular = sin_theta < 1e-6
-
-        if not singular:
-            # theta = atan2(sin_theta, R[2, 2])
-            theta = asin(R[0, 2])
-            # theta = acos(R[0, 0] / R[0, 1])
-            # phi = atan2(R[1, 2] / sin(theta), R[0, 2] / sin(theta))
-            phi = 0
-            # psi = atan2(R[2, 1] / sin(theta), -R[2, 0] / sin(theta))
-            psi = atan2(R[1, 0],R[1, 1])
-            # print("phi, theta, psi",[phi, theta, psi])
-            if ((phi > -1.832 and phi < 1.832) and (theta > -1.22 and theta < 1.22)
+        psi = 0
+        phi = atan2(-R[0, 1], R[1, 1])
+        theta = atan2(-R[2, 0], R[2, 2])
+        if ((phi > -1.832 and phi < 1.832) and (theta > -1.225 and theta < 1.225)
             and (psi > -3.14 and psi < 3.14)):
-                self.phi = phi
-                return np.array([phi, theta, psi])
-            #
-            # theta2 = -theta
-            # # phi2 = atan2(R[1, 2] / sin(theta2), R[0, 2] / sin(theta2))
-            # phi2 = 0
-            # # psi2 = atan2(R[2, 1] / sin(theta2), -R[2, 0] / sin(theta2))
-            # psi2 = atan2(R[1, 0], R[1, 1])
-            # # print("phi2, theta2, psi2",[phi2, theta2, psi2])
-            # if ((phi2 > -1.832 and phi2 < 1.832) and (theta2 > -1.22 and theta2 < 1.22)
-            # and (psi2 > -3.14 and psi2 < 3.14)):
-            #     self.phi = phi2
-            #     return np.array([phi2, theta2, psi2])
-            else:
-                return None
-
+            return np.array([phi, theta, psi])
         else:
-            theta = 0
-            phi = self.phi
-            psi = atan2(-R[0, 1], R[0, 0])
-            if ((phi > -1.832 and phi < 1.832) and (theta > -1.22 and theta < 1.22)
-                    and (psi > -3.14 and psi < 3.14)):
-                self.phi = phi
-                return np.array([phi, theta, psi])
-            else:
-                return None
-
-    def rotation_matrix_to_quaternion(self,R):
-        """将3x3旋转矩阵转换为四元数(w, x, y, z顺序)"""
-        q = np.zeros(4)
-        trace = np.trace(R)
-
+            return None
+    
+    def rotation_matrix_to_quaternion(self, R):
+        q = np.zeros(4); trace = np.trace(R)
         if trace > 0:
             S = np.sqrt(trace + 1.0) * 2
             q[0] = 0.25 * S
@@ -288,13 +272,13 @@ class BaseViewer:
             q[1] = (R[0, 2] + R[2, 0]) / S
             q[2] = (R[1, 2] + R[2, 1]) / S
             q[3] = 0.25 * S
-
-        return q / np.linalg.norm(q)  # 归一化
+        return q / np.linalg.norm(q)
+    
     def get_joint_tf(self, joint_idx, angle):
         """获取指定关节的变换矩阵"""
         transform = self.dh_transform(self.alpha[joint_idx], self.a[joint_idx], self.d[joint_idx], self.theta_offset[joint_idx] + angle)
         return transform
-
+    
     def inverse_kinematics(self, T_base_target):
         """Pieper解法逆运动学求解"""
         # 计算 joint4 位置
@@ -302,16 +286,15 @@ class BaseViewer:
         p_base_joint4 = T_base_target @ p_target_joint4
         px, py, pz = p_base_joint4[0], p_base_joint4[1], p_base_joint4[2]
 
-        # 计算 link1 2 3 角度
-        theta1 = atan2(py, px)
-        if (theta1 == PI):
-            theta1 = 0
-            self.theta1 = theta1
+        if px > 0:
+            # 计算 link1 2 3 角度
+            theta1 = atan2(py, px)
         else:
-            # TODO
-            theta1 = self.theta1
-            # print("no ik solution, fail theta 1")
-            # return None
+            if py > 0:
+                theta1 = -PI + atan2(py, px)
+            else:
+                theta1 = PI + atan2(py, px)
+            # theta1 = PI - atan2(py, px)
 
         T01 = self.dh_transform(self.alpha[0], self.a[0], self.d[0], theta1)
 
@@ -387,61 +370,29 @@ class BaseViewer:
         # print("REAL T36", T36)
 
         return q_sol
-
-    # -------------------------轨迹规划-------------------------
+    
+    # ========================= 轨迹规划 =========================
     def slerp(self, q1, q2, t):
-        """
-        四元数球面线性插值
-        参数:
-        q1, q2: 起始和结束四元数
-        t: 插值参数，取值范围[0, 1]
-        返回:
-        插值结果的四元数
-        """
-        # 确保两个四元数标准化
         q1, q2 = q1 / np.linalg.norm(q1), q2 / np.linalg.norm(q2)
-        # 计算两个四元数之间的余弦值
         cos_half_theta = q1.dot(q2)
-        # 如果点积是负的，则通过改变q2的符号来最小化角度
         if cos_half_theta < 0:
-            q2 = -q2
-            cos_half_theta = -cos_half_theta
-        # 如果两个四元数过于接近，则使用线性插值而不是球面插值
+            q2 = -q2; cos_half_theta = -cos_half_theta
         if np.abs(cos_half_theta) >= 1.0:
             q1 = (1 - t) * q1 + t * q2
             return q1 / np.linalg.norm(q1)
-        # 计算半角的正弦值
         half_theta = np.arccos(cos_half_theta)
         sin_half_theta = np.sqrt(1.0 - cos_half_theta * cos_half_theta)
-        # 如果半角的正弦值接近0，使用线性插值
         if np.abs(sin_half_theta) < 0.001:
             return (1.0 - t) * q1 + t * q2
         ratioA = np.sin((1 - t) * half_theta) / sin_half_theta
         ratioB = np.sin(t * half_theta) / sin_half_theta
-        # 返回插值结果
-        result = ratioA * q1 + ratioB * q2
-        return result
-    def calc_arm_rrt_cubic_traj(
-            self,
-            cur_joints_state,
-            target_joints_state
-    ):
-        """
-        计算机械臂在给定目标关节角度下的运动轨迹
+        return ratioA * q1 + ratioB * q2
+    
+    def calc_arm_rrt_cubic_traj(self, cur_joints_state, target_joints_state):
+        """计算机械臂RRT+Cubic轨迹，返回形状 (N,6)"""
+        q_start = np.asarray(cur_joints_state, dtype=float).reshape(-1)
+        q_goal  = np.asarray(target_joints_state, dtype=float).reshape(-1)
 
-        参数:
-            cur_joints_state:         当前机械臂的 6 关节状态
-            target_joints_state:      机械臂目标 6 关节
-        返回:
-            path: 轨迹
-        """
-        q_start = cur_joints_state
-        q_goal = target_joints_state
-
-        # print(f"q_start : {q_start}")
-        # print(f"q_goal : {q_goal}")
-
-        # Search for a path
         options = RRTPlannerOptions(
             max_step_size=0.05,
             max_connection_dist=5.0,
@@ -454,765 +405,121 @@ class BaseViewer:
             goal_biasing_probability=0.15,
             collision_distance_padding=0.01,
         )
+
         print(f"Planning a path...")
         planner = RRTPlanner(self.model_roboplan, self.collision_model, options=options)
         q_path = planner.plan(q_start, q_goal)
-        # print(f"q_path : {q_path}")
         if q_path is None:
+            print("RRT planning failed!")
             return None
         if len(q_path) > 0:
             print(f"Got a path with {len(q_path)} waypoints")
 
-        # Perform trajectory optimization.
-        dt = 0.025
-        options = CubicTrajectoryOptimizationOptions(
+        # 轨迹优化
+        dt = 0.0075
+        opt = CubicTrajectoryOptimizationOptions(
             num_waypoints=len(q_path),
             samples_per_segment=7,
             min_segment_time=0.5,
             max_segment_time=10.0,
-            min_vel=-1.5,
-            max_vel=1.5,
-            min_accel=-0.75,
-            max_accel=0.75,
-            min_jerk=-1.0,
-            max_jerk=1.0,
+            min_vel=-1.5, max_vel=1.5,
+            min_accel=-0.75, max_accel=0.75,
+            min_jerk=-1.0, max_jerk=1.0,
             max_planning_time=30.0,
             check_collisions=True,
             min_collision_dist=self.distance_padding,
             collision_influence_dist=0.05,
             collision_avoidance_cost_weight=0.0,
-            collision_link_list=[
-                "ground_plane",
-                "link6",
-            ],
+            collision_link_list=["ground_plane", "link6"],
         )
-        print("Optimizing the path...")
-        optimizer = CubicTrajectoryOptimization(self.model_roboplan, self.collision_model, options)
-        traj = optimizer.plan([q_path[0], q_path[-1]], init_path=q_path)
 
-        if traj is not None:
-            print("Trajectory optimization successful")
-            traj_gen = traj.generate(dt)
-            return traj_gen[1]
-        else:
+        print("Optimizing the path...")
+        optimizer = CubicTrajectoryOptimization(self.model_roboplan, self.collision_model, opt)
+        traj = optimizer.plan([q_path[0], q_path[-1]], init_path=q_path)
+        if traj is None:
             return None
 
-    # ---------------------MuJoCo环境渲染---------------------
-    def set_goal_pose(self, goal_body_name, position, quat_wxyz):
-        """
-        设置目标位姿（位置 + 姿态）
-
-        参数解释:
-            position: 目标的位置，(x, y, z)，类型为 numpy.ndarray 或 list。
-            quat_wxyz: 目标的姿态，四元数 (w, x, y, z)，类型为 numpy.ndarray 或 list。
-        """
-        # 设置 target 的位姿
-        # goal_body_name = "target"
-        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, goal_body_name)
-
-        if goal_body_id == -1:
-            raise ValueError(f"Body named '{goal_body_name}' not found in the model.")
-
-        # 获取 joint ID 和 qpos 起始索引
-        goal_joint_id = self.model.body_jntadr[goal_body_id]
-        goal_qposadr = self.model.jnt_qposadr[goal_joint_id]
-
-        # 设置位姿
-        if goal_qposadr + 7 <= self.model.nq:
-            self.data.qpos[goal_qposadr: goal_qposadr + 3] = position
-            self.data.qpos[goal_qposadr + 3: goal_qposadr + 7] = quat_wxyz
-        else:
-            print("[警告] target 的 qpos 索引越界或 joint 设置有误")
-
-    def _get_body_pose(self, body_name: str) -> np.ndarray:
-        """
-        通过 body 名称获取其位姿信息, 返回一个7维向量
-            :param body_name: body名称字符串
-            :return: 7维numpy数组, 格式为 [x, y, z, w, x, y, z]
-            :raises ValueError: 如果找不到指定名称的body
-        """
-        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-        if body_id == -1:
-            raise ValueError(f"未找到名为 '{body_name}' 的body")
-
-        # 提取位置和四元数并合并为一个7维向量
-        position = np.array(self.data.body(body_id).xpos)  # [x, y, z]
-        quaternion = np.array(self.data.body(body_id).xquat)  # [w, x, y, z]
-
-        return position, quaternion
-
-    def get_image_pos_R_from_camera(self, w, h, camera_name):
-
-        # 新建一个矩形区域，(0, 0, w, h) 表示从左上角 (0, 0) 开始，宽 w，高 h
-        viewport = mujoco.MjrRect(0, 0, w, h)
-        # 查找相机 ID
-        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
-        # 设置 fixedcamid 表示当前要渲染的固定相机 ID
-        self.camera.fixedcamid = cam_id
-
-        # 获取相机位姿，以及四元数表示
-        self.camera_pos = self.data.cam_xpos[cam_id]
-        self.camera_mat = self.data.cam_xmat[cam_id].reshape((3, 3))
-
-        # 构建渲染场景数据到 self.scene 中
-        mujoco.mjv_updateScene(
-            self.model, self.data, mujoco.MjvOption(),
-            None, self.camera, mujoco.mjtCatBit.mjCAT_ALL, self.scene
-        )
-        mujoco.mjr_render(viewport, self.scene, self.context)
-        # 创建一个空的 RGB 图像数组，大小为 h x w x 3
-        rgb = np.zeros((h, w, 3), dtype=np.uint8)
-        # 将渲染结果读入 rgb 数组中，第二个参数是深度图(这里传 None 表示不需要)
-        mujoco.mjr_readPixels(rgb, None, viewport, self.context)
-        # 将 RGB 转换为 BGR，适配 OpenCV 默认格式
-        cv_image = cv2.cvtColor(np.flipud(rgb), cv2.COLOR_RGB2BGR)
-        return cv_image
-
-    # ---------------------MuJoCo环境运行---------------------
-    # mj_step单独线程
-    def mujoco_step(self):
-        while True:
-            mujoco.mj_step(self.model, self.data)
-            # 调用一次 get obs 获得最新的 sim data
-            # self._set_sim_data(target_joints_state_np)
-            # 更新一下队列中的 sim data
-            self.sync()
-            time.sleep(0.002)
-    def close(self):
-        # self.running = False
-        self.planning_thread.join()
-        print("Planning stopped.")
-
-    def print_all_body_info(self):
-        """
-        打印模型中所有body的名称、ID、位置和四元数姿态信息
-        """
-        print("\n=== Body 信息 ===")
-        print(f"{'Body Name':<25} {'Body ID':<8} {'Position':<30} {'Quaternion':<35}")
-        print("-" * 100)
-
-        for body_id in range(self.model.nbody):
-            # 获取body名称
-            name_addr = self.model.name_bodyadr[body_id]
-            body_name = self.model.names[name_addr:].split(b'\x00')[0].decode('utf-8')
-
-            # 获取位置和四元数
-            pos = self.data.body(body_id).xpos
-            quat = self.data.body(body_id).xquat
-
-            # cam_pos = self.data.cam_xpos
-
-            print(f"{body_name:<25} {body_id:<8} {str(pos):<30} {str(quat):<35}")
-
-    def print_all_joint_info(self):
-        """
-        打印模型中所有关节的名称、ID、范围限制和当前qpos值
-        """
-        print("\n=== 关节信息 ===")
-        print(f"{'Joint Name':<20} {'Type':<15} {'Qpos Addr':<10} {'Range':<25} {'Current Value':<15}")
-        print("-" * 90)
-
-        for joint_id in range(self.model.njnt):
-            # 获取关节名称
-            name_addr = self.model.name_jntadr[joint_id]
-            joint_name = self.model.names[name_addr:].split(b'\x00')[0].decode('utf-8')
-
-            # 获取关节类型
-            joint_type = self.model.jnt_type[joint_id]
-            type_names = {
-                0: "自由关节(6DOF)",
-                1: "球关节(3DOF)",
-                2: "滑动关节",
-                3: "铰链关节"
-            }
-            type_str = type_names.get(joint_type, "未知类型")
-
-            # 获取qpos地址和范围
-            qpos_addr = self.model.jnt_qposadr[joint_id]
-            if self.model.jnt_limited[joint_id]:
-                jnt_range = f"[{self.model.jnt_range[joint_id, 0]:.2f}, {self.model.jnt_range[joint_id, 1]:.2f}]"
-            else:
-                jnt_range = "无限制"
-
-            # 获取当前值
-            if joint_type == 0:  # 自由关节
-                current_val = self.data.qpos[qpos_addr:qpos_addr + 7]
-            elif joint_type == 1:  # 球关节
-                current_val = self.data.qpos[qpos_addr:qpos_addr + 4]
-            else:  # 滑动/铰链关节
-                current_val = self.data.qpos[qpos_addr]
-
-            print(f"{joint_name:<20} {type_str:<15} {qpos_addr:<10} {jnt_range:<25} {str(current_val):<15}")
-
-
-    def is_running(self):
-        return self.handle.is_running()
-
-    def sync(self):
-        self.handle.sync()
-
-    @property
-    def cam(self):
-        return self.handle.cam
-
-    def calculate_camera_matrix(self, fov, height, width):
-        """
-        计算相机内参矩阵 K。
-
-        参数:
-        fovy (float): 相机的视场角，单位为度。
-        height (int): 图像高度，单位为像素。
-        width (int): 图像宽度，单位为像素。
-
-        返回:
-        K (numpy.array): 相机内参矩阵。
-        """
-        # 将视场角转换为弧度
-        fov_rad = np.radians(fov)
-
-        # 计算焦距（以像素为单位）
-        f = height / (2 * np.tan(fov_rad / 2))
-
-        # 主点（图像中心）
-        cx = (width - 1) / 2
-        cy = (height - 1) / 2
-
-        # 内参矩阵 K
-        K = np.array([
-            [f, 0, cx],
-            [0, f, cy],
-            [0, 1, 1]
-        ])
-
-        return K
-
-    @property
-    def viewport(self):
-        return self.handle.viewportW
-
-    def reset(self):
-        """
-        重置目标位置,机械臂关节回零。
-        Returns
-        -------
-        """
-        while True:
-            # ----------------------------随机目标位置----------------------------
-            center_x = -0.25
-            center_y = 0
-            radius = np.sqrt(0.28745) # 0.53619m
-            theta = np.random.uniform(-np.pi / 2, np.pi / 2)
-            # # theta = -1.3
-            rho = radius * np.random.uniform(0.56, 1)
-            # # 近处点
-            # rho = radius * np.random.uniform(0.56, 0.7)
-
-            # 远处点
-            # # rho = radius * np.random.uniform(0.7, 1)
-            # rho = 0.3002664
-            # theta = 1.1322677361482247
-
-            # 越过桌子的情况
-            if (theta < -PI / 9 and theta > -PI / 6) or (theta > PI / 9 and theta < PI / 6):
-                rho = radius * np.random.uniform(0.45 / radius, 1)
-            if (theta < PI / 9 and theta > -PI / 9) :
-                rho = radius * np.random.uniform(0.75, 1)
-
-            self.rho = rho
-            print("rho", rho)
-            print("theta", theta)
-            x_world_target = rho * np.cos(theta) + center_x
-            y_world_target = rho * np.sin(theta) + center_y
-
-            # 随机设置位置
-            self.target_position[0] = x_world_target
-            self.target_position[1] = y_world_target
-
-            print("self.target_position",self.target_position)
-
-            # 获得篮子的位置
-            board_position, _= self._get_body_pose("board")
-
-            # 如果苹果初始化在了篮子，continue重新设置一遍
-            if ((abs(board_position[0] - self.target_position[0]) < 0.1) and
-                    (abs(board_position[1] - self.target_position[1]) < 0.18)):
-                continue
-            # 如果苹果没有初始化在篮子里，break一次成功
-            else:
-                # 随机夹爪位置
-                # 随机一个球体,定义抓取位置
-                x_sphere_center = self.target_position[0]
-                y_sphere_center = self.target_position[1]
-                z_sphere_center = self.target_position[2]
-                radius_sphere = 0.0883
-                theta_sphere = np.random.uniform(0, 2 * np.pi)
-                # 抓取上方的点
-                phi_sphere = np.random.uniform(0, np.pi / 2)
-                # rho_sphere = radius * np.random.uniform(0.3, 1)
-                piper_position = np.zeros(3)
-                piper_position[0] = radius_sphere * sin(phi_sphere) * cos(theta_sphere) + x_sphere_center
-                piper_position[1] = radius_sphere * sin(phi_sphere) * sin(theta_sphere) + y_sphere_center
-                piper_position[2] = radius_sphere * cos(phi_sphere) + z_sphere_center
-
-                # 在世界系下定义抓取姿态
-                # 绕y轴旋转90度
-                T_world_obj_y_90 = np.eye(4)
-                T_world_obj_y_90[:3, :3] = np.array([[cos(90 / 180 * PI), 0, sin(90 / 180 * PI)],
-                                                     [0, 1, 0],
-                                                     [-sin(90 / 180 * PI), 0, cos(90 / 180 * PI)]]
-                                                    , dtype=float)
-
-                # 绕x轴旋转
-                dx_piper_target = abs(piper_position[0] - self.target_position[0])
-                dy_piper_target = abs(piper_position[1] - self.target_position[1])
-
-                theta_piper_target = 0.0
-
-                # piper在世界坐标系第一象限
-                if (((piper_position[0] - self.target_position[0]) > 0) and
-                        ((piper_position[1] - self.target_position[1]) > 0)):
-                    theta_piper_target = PI + atan2(dx_piper_target, dy_piper_target) - PI / 2
-                # piper在世界坐标系第二象限
-                if (((piper_position[0] - self.target_position[0]) < 0) and
-                        ((piper_position[1] - self.target_position[1]) > 0)):
-                    theta_piper_target = PI - atan2(dx_piper_target, dy_piper_target) - PI / 2
-                # piper在世界坐标系第三象限
-                if (((piper_position[0] - self.target_position[0]) < 0) and
-                        ((piper_position[1] - self.target_position[1]) < 0)):
-                    theta_piper_target = atan2(dx_piper_target, dy_piper_target) - PI / 2
-                # piper在世界坐标系第四象限
-                if (((piper_position[0] - self.target_position[0]) > 0) and
-                        ((piper_position[1] - self.target_position[1]) < 0)):
-                    theta_piper_target = 2 * PI - atan2(dx_piper_target, dy_piper_target) - PI / 2
-
-                # # 计算绕x轴旋转矩阵
-                T_y_90_x_theta = np.eye(4)
-                T_y_90_x_theta[:3, :3] = np.array([[1, 0, 0],
-                                                     [0, cos(theta_piper_target), -sin(theta_piper_target)],
-                                                     [0, sin(theta_piper_target), cos(theta_piper_target)]],
-                                                     dtype=float)
-
-                # T_world_piper = np.eye(4)
-                # T_world_piper = T_world_obj_y_90 @ T_y_90_x_theta
-                # piper_quat_wxyz = self.rotation_matrix_to_quaternion(T_world_piper[:3, :3])
-
-                # 绕y轴旋转90-phi度
-                T_x_theta_y = np.eye(4)
-                T_x_theta_y[:3, :3] = np.array([[cos(PI /2 - phi_sphere), 0, sin(PI /2 - phi_sphere)],
-                                                     [0, 1, 0],
-                                                     [-sin(PI /2 - phi_sphere), 0, cos(PI /2 - phi_sphere)]]
-                                                    , dtype=float)
-
-                T_world_piper = np.eye(4)
-                T_world_piper = T_world_obj_y_90 @ T_y_90_x_theta @ T_x_theta_y
-                piper_quat_wxyz = self.rotation_matrix_to_quaternion(T_world_piper[:3, :3])
-
-                # 传入piper位姿
-                # self.set_goal_pose("target", piper_position, piper_quat_wxyz)
-                # 判断目标是不是香蕉
-                if self.item_name == "banana":
-                    # 获得baselink在世界系下的位姿
-                    arm_base_pos, _ = self._get_body_pose("base_link")
-
-                    # 计算香蕉x，y的位置差
-                    dx_base_obj = self.target_position[0] - arm_base_pos[0]
-                    dy_base_obj = self.target_position[1] - arm_base_pos[1]
-
-                    # 计算香蕉姿态绕z轴旋转的夹角
-                    if (dy_base_obj > 0 and dx_base_obj > 0):
-                        # # 正常情况
-                        # theta_banana = -1 * (random.choice([0, 1]) * PI + atan2(dx_base_obj, dy_base_obj) )
-                        # # 调试：各种异常情况
-                        theta_banana = -1 *  atan2(dx_base_obj, dy_base_obj)
-                        # 绕z轴旋转theta_banana
-                        R_banana = np.array([[cos(theta_banana), -sin(theta_banana), 0],
-                                                     [sin(theta_banana), cos(theta_banana), 0],
-                                                     [0, 0, 1]]
-                                                    , dtype=float)
-                        # 转成四元数
-                        self.target_quat_wxyz  = self.rotation_matrix_to_quaternion(R_banana)
-                        # self.set_goal_pose(self.item_name, self.target_position, banana_quat_wxyz)
-
-                    if (dy_base_obj < 0 and dx_base_obj > 0):
-                        # theta_banana = -1 * (random.choice([0, 1]) * PI + PI - atan2(abs(dx_base_obj), abs(dy_base_obj)))
-                        theta_banana = atan2(abs(dx_base_obj), abs(dy_base_obj))
-                        # 绕z轴旋转theta_banana
-                        R_banana = np.array([[cos(theta_banana), -sin(theta_banana), 0],
-                                                     [sin(theta_banana), cos(theta_banana), 0],
-                                                     [0, 0, 1]]
-                                                    , dtype=float)
-                        # 转成四元数
-                        self.target_quat_wxyz  = self.rotation_matrix_to_quaternion(R_banana)
-                        print("theta_banana",theta_banana)
-                        # banana_quat_wxyz = np.array([-0.7071, 0, 0, 0.7071])
-                        # self.set_goal_pose(self.item_name, self.target_position, banana_quat_wxyz)
-                self.set_goal_pose(self.item_name, self.target_position, self.target_quat_wxyz )
-
-                # ----------------------------传入目标物体位姿----------------------------
-                # self.set_goal_pose("apple", self.target_position, self.target_quat_wxyz)
-                # for i range(3):
-                # self.set_goal_pose("apple", self.target_position, np.array([1, 0, 0, 0]))
-                # self.set_goal_pose("banana", self.target_position, np.array([1, 0, 0, 0]))
-                # self.set_goal_pose(self.item_name, self.target_position, np.array([1, 0, 0, 0]))
-
-                # ------------------------传入机械臂初始状态qpos------------------------
-                # self.data.qpos[:6] = np.zeros(6)
-                # self.data.qpos[6] = 0
-                # self.data.qpos[7] = 0
-                # 仿真同步
-                self.handle.user_scn.ngeom = 0
-
-                mujoco.mj_forward(self.model, self.data)
-                self.sync()
-                time.sleep(0.002)
-
-                break
-
-    # 这个函数是每走一个 mj step 就获得一个最新的 sim data
-    def _get_sim_data(self, joints_state):
-
-        # Read arm position
-        start = time.perf_counter()
-        # ==== 左臂 ====
-        joint_state = joints_state
-        self.motors["joint_1.pos"] = round(joints_state[0][0], 8)
-        self.motors["joint_2.pos"] = round(joints_state[0][1], 8)
-        self.motors["joint_3.pos"] = round(joints_state[0][2], 8)
-        self.motors["joint_4.pos"] = round(joints_state[0][3], 8)
-        self.motors["joint_5.pos"] = round(joints_state[0][4], 8)
-        self.motors["joint_6.pos"] = round(joints_state[0][5], 8)
-        # gripper_raw = self.piper.GetArmGripperMsgs().gripper_state.grippers_angle
-        self.motors["gripper.pos"] = round(joints_state[0][6] / 0.035, 8)
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
-        obs_dict = self.motors.copy()
-        # 获取相机图片
-        start = time.perf_counter()
-        obs_dict["wrist_cam"] = self.get_image_pos_R_from_camera(640, 480, "wrist_cam")
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read wrist_cam: {dt_ms:.1f}ms")
-        # wrist_cam_image = self.get_image_pos_R_from_camera(640, 480, "wrist_cam")
-        return obs_dict
-
-    # 这个函数是把 sim data 往队列里传
-    def _set_sim_data(self, joints_state):
-        sim_data = self._get_sim_data(joints_state)
-        try:
-            self.sim_state_queue.put_nowait(sim_data)
-        except queue.Full:
-            try:
-                _ = self.sim_state_queue.get_nowait()
-                self.sim_state_queue.put_nowait(sim_data)
-            except queue.Empty:
-                pass
-
-    # 这个函数是获取 sim data 队列中最新的元素
-    def get_observation(self):
-        try:
-            # 尝试从队列中获取数据
-            sim_data = self.sim_state_queue.get_nowait()
-            return sim_data
-        except queue.Empty:
-            # 如果队列为空，处理异常
-            pass
-
-    def run_before(self):
-        """
-        求解机械臂IK
-
-        参数解释:
-            position: 目标的位置，(x, y, z)，类型为 numpy.ndarray 或 list。
-            quat_wxyz: 目标的姿态，四元数 (w, x, y, z)，类型为 numpy.ndarray 或 list。
-        """
-        # -----------------step 1 : 获取body在世界坐标系下的位姿-----------------
-        self.init_state = self.data.qpos.copy()
-        self.q_vec = None
-
-        q_start = np.zeros(6)
-        if q_start is None:
-            raise RuntimeError(" q_start is invalid... ")
-        # mujoco返回的是[w, x, y, z]顺序的
-        arm_base_name = "base_link"
-        arm_base_pos, arm_base_quat = self._get_body_pose(arm_base_name)
-        arm_base_quat_xyzw = np.roll(arm_base_quat, -1)
-
-        arm_link1_name = "link1"
-        arm_link1_pos, arm_link1_quat = self._get_body_pose(arm_link1_name)
-        arm_link1_quat_xyzw = np.roll(arm_link1_quat, -1)
-
-        arm_link6_name = "link6"
-        arm_link6_pos, arm_link6_quat = self._get_body_pose(arm_link6_name)
-        arm_link6_quat_xyzw = np.roll(arm_link6_quat, -1)
-
-        # -----------------------step 2 : 设置初始抓取位置----------------------
-        T_world_link1 = np.eye(4)
-        T_world_link1[:3, :3] = Rotation.from_quat(arm_link1_quat_xyzw).as_matrix()
-        T_world_link1[:3, 3] = arm_link1_pos
-
-        # 计算joint1转动的夹角
-        dx_link1_obj = self.target_position[0] - arm_link1_pos[0]
-        dy_link1_obj = self.target_position[1] - arm_link1_pos[1]
-        theta_link1_obj = np.arctan2(dy_link1_obj, dx_link1_obj)
-        self.theta1 = theta_link1_obj
-
-        # # 控制joint1转动到能看到目标且视野大的位置
-        # # 理想夹角 joint3：-0.661；joint5：1.22；gripper：0.035
-        # target_joints_state_sta1 = np.array([theta_link1_obj, 0, -0.661, 0, 1.22, 0]
-        #                                     , dtype=float)
-
-        # 抬高视角，想要看到板子
-        target_joints_state_sta1 = np.array([0, 0, -0.661, 0, 1.22, 0]
-                                            , dtype=float)
-
-        # # 测试最大工作半径
-        # self.data.qpos[1] = 2.51
-        # self.data.qpos[2] = -2.06
-        # self.data.qpos[4] = 0.647
-
-        # 调用RRT规划轨迹位姿，从初始位置0到初始可以看到板子的抓取位姿
-        path = self.calc_arm_rrt_cubic_traj(q_start, target_joints_state_sta1)
-        # 新建一个用来保存全部waypoint的数组
-        path_total = np.array([[0,0,0,0,0,0,0]])
-
-        if path is None:
-            self.count = self.count + 1
-            raise RuntimeError(" planning path failed... ")
-
-        # 一阶段mujoco同步执行可视化
-        index = 1
-
-        while True:
-            if index >= path.shape[1] - 1:
-                # self.cur_episode_done = True
-                break
-
-            for i in range(3):
-                target_joints_state = path[:6, index]
-                target_joints_state_np = np.array([
-                    [target_joints_state[0], target_joints_state[1], target_joints_state[2],
-                     target_joints_state[3], target_joints_state[4], target_joints_state[5],
-                     0.035]])
-                path_total = np.vstack([path_total, target_joints_state_np])
-                # self.data.ctrl[:7] = target_joints_state_np
-                # mujoco.mj_step(self.model, self.data)
-                # # 调用一次 get obs 获得最新的 sim data
-                # # self._set_sim_data(target_joints_state_np)
-                # # 更新一下队列中的 sim data
-                # self.sync()
-                # time.sleep(0.002)
-
-                # # 获取当前腕部相机图片，并将腕部相机位置保存在全局变量中
-                # wrist_cam_image = self.get_image_pos_R_from_camera(640, 480, "wrist_cam")
-                # cv2.imshow("MuJoCo Camera", wrist_cam_image)
-                # key = cv2.waitKey(1)
-                # # Press esc or 'q' to close the image window
-                # if key & 0xFF == ord('q') or key == 27:
-                #     cv2.destroyAllWindows()
-
-            index += 1
-
-        # self.get_observation()
-        # print("self.get_observation()",self.get_observation())
-        # print("self.get_observation()", self.get_observation())
-
-        # 转动joint1，想要看到苹果
-        target_joints_state_sta2 = np.array([theta_link1_obj, 0, -0.661, 0, 1.22, 0]
-                                            , dtype=float)
-
-        # # 测试最大工作半径
-        # self.data.qpos[1] = 2.51
-        # self.data.qpos[2] = -2.06
-        # self.data.qpos[4] = 0.647
-
-        # 调用RRT规划轨迹位姿，从可以看到板子的抓取位姿到可以看到苹果的抓取位姿
-        path = self.calc_arm_rrt_cubic_traj(target_joints_state_sta1, target_joints_state_sta2)
-
-        if path is None:
-            self.count = self.count + 1
-            raise RuntimeError(" planning path failed... ")
-
-        # 访问最后一行
-        last_point_sta2 = np.array(path[:, -1], dtype=float)
-
-        # 一阶段mujoco同步执行可视化
-        index = 0
-
-        while True:
-            if index >= path.shape[1] - 1:
-                # self.cur_episode_done = True
-                break
-
-            for i in range(3):
-                target_joints_state = path[:6, index]
-                target_joints_state_np = np.array([
-                    [target_joints_state[0], target_joints_state[1], target_joints_state[2],
-                     target_joints_state[3], target_joints_state[4], target_joints_state[5],
-                     0.035]])
-                path_total = np.vstack([path_total, target_joints_state_np])
-                # self.data.ctrl[:7] = target_joints_state_np
-                # mujoco.mj_step(self.model, self.data)
-                # # self._set_sim_data(target_joints_state_np)
-                # self.sync()
-                # time.sleep(0.002)
-
-            index += 1
-
-        # 获取当前腕部相机图片，并将腕部相机位置保存在全局变量中
-        # wrist_cam_image = self.get_image_pos_R_from_camera(640, 480, "wrist_cam")
-        # cv2.imshow("MuJoCo Camera", wrist_cam_image)
-        # # cv2.waitKey(1000)
-        # cv2.destroyAllWindows()
-
-        # ------------------step 3 : 二阶段计算平滑的抓取轨迹------------------
-        # # 获取世界坐标系下的相机位姿
-        # T_world_wri_cam = np.eye(4)
-        # T_world_wri_cam[:3, :3] = self.camera_mat
-        # T_world_wri_cam[:3, 3] = self.camera_pos
-        #
-        # self.wri_cam_quat_wxyz = self.rotation_matrix_to_quaternion(self.camera_mat)
-        #
-        # # 获取目标点在相机坐标系下的位姿
-        # T_wri_cam_world = np.linalg.inv(T_world_wri_cam)
-        #
-        # T_wri_cam_obj = np.eye(4)
-        T_world_obj = np.eye(4)
-        T_world_obj[:3, :3] = Rotation.from_quat(self.target_quat_xyzw).as_matrix()
-        T_world_obj[:3, 3] = self.target_position
-        pos_world_obj = self.target_position
-
-        # T_wri_cam_obj = T_wri_cam_world @ T_world_obj
-        #
-        # pos_cam_obj = T_wri_cam_obj[:3, 3]
-        # pos_cam_obj_norm = pos_cam_obj / pos_cam_obj[2]
-        #
-        # # 获取相机内参矩阵
-        # camera_matrix = self.calculate_camera_matrix(58, 480, 640)
-        # # print("camera_center", camera_matrix[0][2], camera_matrix[1][2])
-        #
-        # # 获取像素坐标系下的目标点
-        # pos_img_obj = np.zeros(3)
-        # pos_img_obj = camera_matrix @ pos_cam_obj_norm
-
-        # # 因为h是480对应y，w是640对应x，判断图像系下是否存在这个点
-        # if (pos_img_obj[0] > 640 or pos_img_obj[0] < 0) or (pos_img_obj[1] > 480
-        #                                                     or pos_img_obj[1] < 0):
-        #     print("Can not found object, planning fail")
-        #     return
-
-        # cv2.imshow("MuJoCo Camera", wrist_cam_image)
-        # cv2.waitKey(5000)
-        # cv2.destroyAllWindows()
-
-        # 直接在3D的相机坐标系下进行位置插值
-        # 获取相机坐标系下末端执行器的位置与姿态
-        T_6_ee = np.eye(4)
-        T_world_link6 = np.eye(4)
-        T_6_ee[:3, 3] = np.array([0, 0, 0.053], dtype=float)
-
-        # arm_link6_name = "link6"
-        # arm_link6_pos, arm_link6_quat = self._get_body_pose(arm_link6_name)
-        # arm_link6_quat_xyzw = np.roll(arm_link6_quat, -1)
-        # T_world_link6[:3, :3] = Rotation.from_quat(arm_link6_quat_xyzw).as_matrix()
-        # T_world_link6[:3, 3] = arm_link6_pos
-        # # T_wri_cam_ee = T_wri_cam_world @ T_world_link6 @ T_6_ee
-        # T_world_ee = T_world_link6 @ T_6_ee
-        #
-        arm_base_name = "base_link"
-        arm_base_pos, arm_base_quat = self._get_body_pose(arm_base_name)
-        arm_base_quat_xyzw = np.roll(arm_base_quat, -1)
-        # 计算world坐标系下baselink的变换矩阵
-        T_world_base = np.eye(4)
-        T_world_base[:3, :3] = Rotation.from_quat(arm_base_quat_xyzw).as_matrix()
-        T_world_base[:3, 3] = arm_base_pos
-
-
-        T_base_link6 = self.forward_kinematics_sub([theta_link1_obj, 0, -0.661, 0, 1.22, 0], 6)
-        # R06 = T06[0:3, 0:3]
-        T_world_link6 = T_world_base @ T_base_link6
-        T_world_ee = T_world_link6 @ T_6_ee
-        pos_world_ee = T_world_ee[:3, 3]
-        # pos_wri_cam_ee = T_wri_cam_ee[:3, 3]
+        print("Trajectory optimization successful")
+        # 关键：generate 的 q 通常是 (dof, N)，你需要转置成 (N, dof)
+        traj_gen = traj.generate(dt)
+        q = np.asarray(traj_gen[1])  # 通常 index 1 是关节位置
+        if q.ndim != 2:
+            raise RuntimeError(f"Unexpected traj q shape: {q.shape}")
+        # 统一成 (N,6)
+        if q.shape[0] == 6 and q.shape[1] > 6:
+            q = q.T
+        if q.shape[1] != 6:
+            raise RuntimeError(f"RRT traj unexpected dof: {q.shape}")
+        return q
+    
+    def _add_gripper_state(self, cur_joint_pos, gripper_state_num, is_grasp_open):
+        grasp_control = 0.035 if is_grasp_open else 0.0
+        joint_state = np.append(cur_joint_pos, grasp_control)
+        path_total = np.tile(joint_state, (gripper_state_num, 1))
+        return path_total
+    
+    def _plan_arm_traj(self, item_name, target_pose, cur_ee_pose, cur_base_link_pose, 
+                      cur_link1_pose, slerp_num, cur_joint_pos, is_grasp_open):
+
+        ## TODO 重新计算 grasp pose 的姿态
+        # ===================================================================
+        self.rho_apple = sqrt((target_pose[0] - cur_base_link_pose[0]) ** 2 + (target_pose[1] - cur_base_link_pose[1]) ** 2 )
 
         # 针对不同目标点使用不同插值曲线
-        if self.item_name == "apple":
-            if self.rho <= 0.7 * np.sqrt(0.28745):
+        if item_name == "apple":
+            if self.rho_apple <= 0.7 * np.sqrt(0.28745):
                 t_target = 0.65
                 # # 相机坐标系下控制点
                 # pos_medium_ee_obj = (pos_wri_cam_ee + pos_cam_obj) / 2 + np.array([0, 0.2, 0])
                 # 世界坐标系下控制点
-                pos_world_ctrl = (pos_world_ee + pos_world_obj) / 2 + np.array([0, 0, 0.2])
+                pos_world_ctrl = (cur_ee_pose[0:3] + target_pose[0:3]) / 2 + np.array([0, 0, 0.2])
             else:
-                t_target = 0.8
+                # high vision
+                # t_target = 0.8
+                # low vision
+                t_target = 1
                 # # 相机坐标系下控制点
                 # pos_medium_ee_obj = (pos_wri_cam_ee + pos_cam_obj) / 2 + np.array([0, 0.1, 0])
                 # 世界坐标系下控制点
-                pos_world_ctrl = (pos_world_ee + pos_world_obj) / 2 + np.array([0, 0, 0.1])
+                pos_world_ctrl = (cur_ee_pose[0:3] + target_pose[0:3]) / 2 + np.array([0, 0, 0.15])
+        elif item_name == "banana":
+            if self.rho_apple <= 0.7 * np.sqrt(0.28745):
+                t_target = 0.65
+                # # 相机坐标系下控制点
+                # pos_medium_ee_obj = (pos_wri_cam_ee + pos_cam_obj) / 2 + np.array([0, 0.2, 0])
+                # 世界坐标系下控制点
+                pos_world_ctrl = (cur_ee_pose[0:3] + target_pose[0:3]) / 2 + np.array([0, 0, 0.2])
+            else:
+                # high vision
+                # t_target = 0.8
+                # low vision
+                t_target = 1
+                # # 相机坐标系下控制点
+                # pos_medium_ee_obj = (pos_wri_cam_ee + pos_cam_obj) / 2 + np.array([0, 0.1, 0])
+                # 世界坐标系下控制点
+                pos_world_ctrl = (cur_ee_pose[0:3] + target_pose[0:3]) / 2 + np.array([0, 0, 0.15])
 
-        # if self.item_name == "banana":
-        #     if self.rho <= 0.7 * np.sqrt(0.28745):
-        #         t_target = 1
-        #
-        #         # 控制点在3/4点
-        #         pos_medium_ee_obj = (3 * pos_cam_obj + pos_wri_cam_ee) / 4 + np.array([0, 0.2, 0])
-        #     else:
-        #         # 目标点初始化在远处
-        #         t_target = 1
-        #
-        #         # 控制点在3/4点
-        #         pos_medium_ee_obj = (3 * pos_cam_obj + pos_wri_cam_ee) / 4 + np.array([0, 0.15, 0])
-
-        # 对末端点在相机坐标系下pos_wri_cam_ee和目标位置pos_cam_obj进行插值
-        # 插值比例 t 从 0 到 1
-        t_values = np.linspace(0, 1, num=150)  # 生成10个点
-        # 方案一： 位置线性插值
-        # points_cam_ee2obj = np.array([
-        #                 (1 - t) * pos_wri_cam_ee + t * pos_cam_obj
-        #                 for t in t_values])
-        # 方案二： 贝塞尔曲线插值
-        # 相机坐标系下位置插值
-        # points_cam_ee2obj = np.array([
-        #     (1 - t) ** 2 * pos_wri_cam_ee + 2 * (1 - t) * t * pos_medium_ee_obj +
-        #     t ** 2 * pos_cam_obj
+        # # 对末端点在相机坐标系下pos_wri_cam_ee和目标位置pos_cam_obj进行插值
+        # # 插值比例 t 从 0 到 1
+        # t_values = np.linspace(0, 1, num=150)  # 生成10个点
+        # # 方案一： 位置线性插值
+        # # points_cam_ee2obj = np.array([
+        # #                 (1 - t) * pos_wri_cam_ee + t * pos_cam_obj
+        # #                 for t in t_values])
+        # # 方案二： 贝塞尔曲线插值
+        # # 世界坐标系下位置插值
+        # points_world_ee2obj = np.array([
+        #     (1 - t) ** 2 * pos_world_ee + 2 * (1 - t) * t * pos_world_ctrl +
+        #     t ** 2 * pos_world_obj
         #     for t in t_values
         # ])
-        # 世界坐标系下位置插值
-        points_world_ee2obj = np.array([
-            (1 - t) ** 2 * pos_world_ee + 2 * (1 - t) * t * pos_world_ctrl +
-            t ** 2 * pos_world_obj
-            for t in t_values
-        ])
-        #
-        # # 世界系下贝塞尔曲线起点
-        # pos_world_ee = (T_world_wri_cam @ np.array([pos_wri_cam_ee[0],
-        #                 pos_wri_cam_ee[1], pos_wri_cam_ee[2], 1]))[:3]
-        # # 世界系下贝塞尔曲线终点
-        # pos_world_obj = (T_world_wri_cam @ np.array([pos_cam_obj[0],
-        #                 pos_cam_obj[1], pos_cam_obj[2], 1]))[:3]
-        # # 世界系下贝塞尔曲线控制点
-        # pos_world_medium = (T_world_wri_cam @ np.array([pos_medium_ee_obj[0],
-        #                 pos_medium_ee_obj[1], pos_medium_ee_obj[2], 1]))[:3]
+
         # 计算目标点切向量
-        B_1_dot_target = (2 * (1 - t_target) * (pos_world_ctrl - pos_world_ee)
-                        + 2 * t_target *(pos_world_obj - pos_world_ctrl))
+        B_1_dot_target = (2 * (1 - t_target) * (pos_world_ctrl - cur_ee_pose[0:3])
+                          + 2 * t_target * (target_pose[0:3] - pos_world_ctrl))
         target_point_tangent = PI / 2 + atan2((- B_1_dot_target[2]),
-                        sqrt(B_1_dot_target[0] ** 2 + B_1_dot_target[1] ** 2))
-
-        # # 将相机坐标系下的插值点转换回世界坐标系下
-        # points_world_ee2obj = np.array([
-        #     T_world_wri_cam @ np.array([p[0], p[1], p[2], 1])
-        #     for p in points_cam_ee2obj])
-
-        # 二阶段计算抓取位姿
-        arm_base_name = "base_link"
-        arm_base_pos, arm_base_quat = self._get_body_pose(arm_base_name)
-        arm_base_quat_xyzw = np.roll(arm_base_quat, -1)
-        # 计算world坐标系下baselink的变换矩阵
-        T_world_base = np.eye(4)
-        T_world_base[:3, :3] = Rotation.from_quat(arm_base_quat_xyzw).as_matrix()
-        T_world_base[:3, 3] = arm_base_pos
-
-        # 求 T_world_base 的逆
-        T_base_world = np.linalg.inv(T_world_base)
+                                              sqrt(B_1_dot_target[0] ** 2 + B_1_dot_target[1] ** 2))
+        
 
         T_world_obj = np.eye(4)
         T_world_obj_sta1 = np.eye(4)
@@ -1221,6 +528,9 @@ class BaseViewer:
         # TODO:自定义抓取位姿
         # 重点在于抓取位姿随着一阶段的转动发生了改变
         # 绕z轴旋转theta_link1_obj
+        dx_link1_obj = target_pose[0] - cur_link1_pose[0]
+        dy_link1_obj = target_pose[1] - cur_link1_pose[1]
+        theta_link1_obj = np.arctan2(dy_link1_obj, dx_link1_obj)
         T_world_obj_sta1[:3, :3] = np.array([[cos(theta_link1_obj), -sin(theta_link1_obj), 0],
                                              [sin(theta_link1_obj), cos(theta_link1_obj), 0],
                                              [0, 0, 1]]
@@ -1230,309 +540,889 @@ class BaseViewer:
                                              [0, 1, 0],
                                              [-sin(target_point_tangent), 0, cos(target_point_tangent)]]
                                             , dtype=float)
-        # option：给定抓取姿态
-        # T_world_obj_sta2[:3, :3] = np.array([[cos(125 / 180 * PI), 0, sin(125 / 180 * PI)],
-        #                                      [0, 1, 0],
-        #                                      [-sin(125 / 180 * PI), 0, cos(125 / 180 * PI)]]
-        #                                     , dtype=float)
+
         T_world_obj = T_world_obj_sta1 @ T_world_obj_sta2
-        T_world_obj[:3, 3] = self.target_position
-        # 将目标点的pose转换到base_link下
-        T_base_obj = T_base_world @ T_world_obj
+        T_world_obj[:3, 3] = target_pose[0:3]
 
-        # 姿态四元数插值
-        # 获取世界坐标系下末端姿态四元数
-        world_ee_quat = self.rotation_matrix_to_quaternion((T_world_link6 @ T_6_ee)[:3, :3])
+        target_quat = self.rotation_matrix_to_quaternion((T_world_obj)[:3, :3])
+        target_pose[3:] = target_quat
+        # ===================================================================
 
-        # 获取世界坐标系下抓取位姿四元数
-        world_obj_quat = self.rotation_matrix_to_quaternion((T_world_obj)[:3, :3])
-
-        # slerp插值
-        quats_world_ee2obj = np.array([
-            self.slerp(world_ee_quat, world_obj_quat, t)
+        cur_ee_pos = cur_ee_pose[0:3]
+        cur_ee_quat = cur_ee_pose[3:7]
+        cur_base_link_pos = cur_base_link_pose[0:3]
+        cur_base_link_quat = cur_base_link_pose[3:7]
+        target_pos = target_pose[0:3]
+        target_quat = target_pose[3:7]
+        ee_to_obj_dis = sqrt((target_pos[0] - cur_base_link_pos[0])**2 + 
+                             (target_pos[1] - cur_base_link_pos[1])**2)
+        if ee_to_obj_dis <= 0.7 * np.sqrt(0.28745):
+            pos_world_ctrl = (cur_ee_pos + target_pos) / 2 + np.array([0, 0, 0.2])
+        else:
+            pos_world_ctrl = (cur_ee_pos + target_pos) / 2 + np.array([0, 0, 0.15])
+        t_values = np.linspace(0, 1, num=slerp_num)
+        points_world_ee2obj = np.array([
+            (1-t)**2 * cur_ee_pos + 2*(1-t)*t * pos_world_ctrl + t**2 * target_pos
             for t in t_values
         ])
+        quats_world_ee2obj = np.array([
+            self.slerp(cur_ee_quat, target_quat, t) for t in t_values
+        ])
+        cur_base_link_quat_xyzw = np.roll(cur_base_link_quat, -1)
+        T_world_base = np.eye(4)
+        T_world_base[:3, :3] = Rotation.from_quat(cur_base_link_quat_xyzw).as_matrix()
+        T_world_base[:3, 3] = cur_base_link_pos
+        T_base_world = np.linalg.inv(T_world_base)
+        path_total = np.zeros((1, 7))
+        path_total[0, :6] = cur_joint_pos
+        path_total[0, 6] = 0.035 if is_grasp_open else 0
+        grasp_control = 0.035 if is_grasp_open else 0
 
-        # TODO：最终抓取位置
-        if self.item_name == "apple":
+        if item_name == "apple":
             drop_lens = 15
-        # 香蕉容易滑动
-        if self.item_name == "banana":
-            drop_lens = 30
 
-        for index_1 in range(len(quats_world_ee2obj) - drop_lens):
+        if item_name == "banana":
+            drop_lens = 0
 
-            # mujoco.mjv_initGeom(
-            #     self.handle.user_scn.geoms[index_1],
-            #     type=mujoco.mjtGeom.mjGEOM_SPHERE,
-            #     size=[0.005, 0, 0],
-            #     pos=np.array([points_world_ee2obj[index_1][0], points_world_ee2obj[index_1][1],
-            #                   points_world_ee2obj[index_1][2]]),
-            #     mat=np.eye(3).flatten(),
-            #     rgba=np.array([1, 0, 0, 1])
-            # )
-            # self.handle.user_scn.ngeom += 1
-            #
-            # # self.set_goal_pose("target", points_world_ee2obj[index_1][:3],
-            # #                        quats_world_ee2obj[index_1])
-            # # 调试：world_obj_quat
-            # self.set_goal_pose("target", points_world_ee2obj[index_1][:3],
-            #                                           world_obj_quat)
-
-            quat_world_ee2obj_xyzw = np.roll(quats_world_ee2obj[index_1], -1)
-            # 计算world坐标系下插值点的变换矩阵
-            T_world_ee2obj = np.eye(4)
-            T_world_ee2obj[:3, :3] = Rotation.from_quat(quat_world_ee2obj_xyzw).as_matrix()
-            T_world_ee2obj[:3, 3] = points_world_ee2obj[index_1][:3]
-            T_base_ee2obj = T_base_world @ T_world_ee2obj
-            target_joints_state = self.inverse_kinematics(T_base_ee2obj)
-            # TODO: 如果关节超限
+        for idx in range(len(quats_world_ee2obj)- drop_lens):
+            quat_world_xyzw = np.roll(quats_world_ee2obj[idx], -1)
+            T_world = np.eye(4)
+            T_world[:3, :3] = Rotation.from_quat(quat_world_xyzw).as_matrix()
+            T_world[:3, 3] = points_world_ee2obj[idx][:3]
+            T_base = T_base_world @ T_world
+            target_joints_state = self.inverse_kinematics(T_base)
             if target_joints_state is None:
-                print("at index:", index_1)
                 continue
-            # print("new index:", index_1)
-            for i in range(5):
-                target_joints_state_np = np.array([
-                    [target_joints_state[0], target_joints_state[1], target_joints_state[2],
-                     target_joints_state[3], target_joints_state[4], target_joints_state[5],
-                     0.035]])
-                path_total = np.vstack([path_total, target_joints_state_np])
-                if index_1 > 75:
-                    path_total = np.vstack([path_total, target_joints_state_np])
-                    path_total = np.vstack([path_total, target_joints_state_np])
-                # self.data.ctrl[:7] = target_joints_state_np
-                # # # 调试：world_obj_quat
-                # # self.set_goal_pose("target", points_world_ee2obj[index_1][:3],
-                # #                    world_obj_quat)
-                # mujoco.mj_step(self.model, self.data)
-                # # self._set_sim_data(target_joints_state_np)
-                # self.sync()
-                # time.sleep(0.002)
+            target_np = np.array([[*target_joints_state, grasp_control]])
+            path_total = np.vstack([path_total, target_np])
+        return path_total
+    
+    # ======= 新增：通用工具 =======
+    def _pose_to_T_base(self, base_pose_wxyz7, target_pose_wxyz7):
+        """
+        根据 base_link 世界位姿和目标世界位姿，得到 T_base_target（4x4）
+        pose = [x,y,z,w,x,y,z] (wxyz)
+        """
+        base_pos = base_pose_wxyz7[:3]
+        base_quat_wxyz = base_pose_wxyz7[3:7]
+        tgt_pos = target_pose_wxyz7[:3]
+        tgt_quat_wxyz = target_pose_wxyz7[3:7]
+        # world->base
+        T_world_base = np.eye(4)
+        T_world_base[:3, :3] = Rotation.from_quat(np.roll(base_quat_wxyz, -1)).as_matrix()
+        T_world_base[:3, 3] = base_pos
+        T_base_world = np.linalg.inv(T_world_base)
+        # world->target
+        T_world_tgt = np.eye(4)
+        T_world_tgt[:3, :3] = Rotation.from_quat(np.roll(tgt_quat_wxyz, -1)).as_matrix()
+        T_world_tgt[:3, 3] = tgt_pos
+        # base->target
+        return T_base_world @ T_world_tgt
 
-        # TODO：到达目标位姿，夹爪闭合抓取
-        for j in range(1000):
-            target_joints_state_np = np.array([
-                                               [target_joints_state[0],target_joints_state[1],target_joints_state[2]
-                                               ,target_joints_state[3],target_joints_state[4],target_joints_state[5],
-                                               - (0.035 / 1000) * j + 0.035]])
-            # print(target_joints_state_np)
-            path_total = np.vstack([path_total, target_joints_state_np])
-            # self.data.ctrl[:7] = target_joints_state_np
-            # mujoco.mj_step(self.model, self.data)
-            # # self._set_sim_data(target_joints_state_np)
-            # self.sync()
-            # time.sleep(0.002)
+    def _pad_with_gripper(self, q_path, is_open):
+        """把 (N,6) 或 (6,N) 的关节序列，变成 (N,7)（最后一列为夹爪）"""
+        q = np.asarray(q_path, dtype=float)
+        if q.ndim == 1:
+            q = q.reshape(1, -1)
+        # 统一成 (N,6)
+        if q.shape == (6,):
+            q = q.reshape(1, 6)
+        elif q.shape[0] == 6 and q.shape[1] != 6:
+            q = q.T
+        if q.shape[1] != 6:
+            raise RuntimeError(f"_pad_with_gripper expects (...,6), got {q.shape}")
+        grip = 0.035 if is_open else 0.0
+        gcol = np.full((q.shape[0], 1), grip, dtype=float)
+        return np.hstack([q, gcol])
 
-        # TODO:抓取成功后，回放之前规划的位姿
-        latest_points_world_ee2obj = points_world_ee2obj[:len(points_world_ee2obj) - drop_lens][::-1]
-        latest_quats_world_ee2obj = quats_world_ee2obj[:len(quats_world_ee2obj) - drop_lens][::-1]
+    def _get_body_pose_any(self, names):
+        """多个候选名里找第一个存在的 body，并返回位姿和实际名字"""
+        for name in names:
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if bid != -1:
+                pos = np.array(self.data.body(bid).xpos)
+                quat = np.array(self.data.body(bid).xquat)
+                return pos, quat, name
+        available = [mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i)
+                     for i in range(self.model.nbody)]
+        raise ValueError(f"找不到候选 body {names}，可用 body 前 20 个: {available[:20]}")
 
-        for index_1 in range(len(latest_quats_world_ee2obj) - 40 ):
-            # 清除可视化点
-            self.handle.user_scn.ngeom  = 0
-            latest_quat_world_ee2obj_xyzw = np.roll(latest_quats_world_ee2obj[index_1], -1)
-            # 计算world坐标系下baselink的变换矩阵
-            T_world_ee2obj = np.eye(4)
-            T_world_ee2obj[:3, :3] = Rotation.from_quat(latest_quat_world_ee2obj_xyzw).as_matrix()
-            T_world_ee2obj[:3, 3] = latest_points_world_ee2obj[index_1][:3]
-            T_base_ee2obj = T_base_world @ T_world_ee2obj
-            target_joints_state = self.inverse_kinematics(T_base_ee2obj)
-            if target_joints_state is None:
-                print("at index:", index_1)
-                continue
-            target_joints_state_np_sub = np.array(target_joints_state)
+    # ========================= 环境控制相关 =========================
+    def set_goal_pose(self, goal_body_name, position, quat_wxyz):
+        goal_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, goal_body_name)
+        if goal_body_id == -1:
+            raise ValueError(f"Body named '{goal_body_name}' not found in the model.")
+        goal_joint_id = self.model.body_jntadr[goal_body_id]
+        if goal_joint_id == -1:
+            raise ValueError(f"Body '{goal_body_name}' 没有关节，不能设定位姿")
+        goal_qposadr = self.model.jnt_qposadr[goal_joint_id]
+        self.data.qpos[goal_qposadr: goal_qposadr + 3] = position
+        self.data.qpos[goal_qposadr + 3: goal_qposadr + 7] = quat_wxyz
+    
+    def _get_body_pose(self, body_name: str):
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if body_id == -1:
+            raise ValueError(f"未找到名为 '{body_name}' 的body")
+        position = np.array(self.data.body(body_id).xpos)
+        quaternion = np.array(self.data.body(body_id).xquat)
+        return position, quaternion
+    
+    def _get_site_pose(self, site_name: str):
+        site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+        if site_id == -1:
+            raise ValueError(f"未找到名为 {site_name} 的site")
+        position = np.array(self.data.site(site_id).xpos)
+        xmat = np.array(self.data.site(site_id).xmat)
+        quaternion = np.zeros(4)
+        mujoco.mju_mat2Quat(quaternion, xmat)  # [w, x, y, z]
+        return position, quaternion
+    
+    def _get_obj_grasp_pose(self, obj_name):
+        """
+        最好在 XML 里给物体放置 site: <site name="apple_grasp_site" .../>
+        我会先找 grasp site；找不到就看 self.grasp_poses；再不行用物体位姿+上移 5cm
+        """
+        # 1) site
+        grasp_site_name = f"{obj_name}_grasp_pose"
+        site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, grasp_site_name)
+        if site_id != -1:
+            pos = np.array(self.data.site(site_id).xpos)
+            xmat = np.array(self.data.site(site_id).xmat)
+            quat = np.zeros(4)
+            mujoco.mju_mat2Quat(quat, xmat)
+            return pos, quat
+        # 2) 用户预置
+        if obj_name in self.grasp_poses and self.grasp_poses[obj_name]["position"] is not None:
+            return np.array(self.grasp_poses[obj_name]["position"]), np.array(self.grasp_poses[obj_name]["quaternion"])
+        # 3) 兜底：物体位姿上移 5cm
+        obj_pos, obj_quat = self._get_body_pose(obj_name)
+        grasp_pos = obj_pos.copy(); grasp_pos[2] += 0.05
+        return grasp_pos, obj_quat
+    
+    def get_image_pos_R_from_camera(self, w, h, camera_name):
+        viewport = mujoco.MjrRect(0, 0, w, h)
+        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
+        self.camera.fixedcamid = cam_id
+        self.camera_pos = self.data.cam_xpos[cam_id]
+        self.camera_mat = self.data.cam_xmat[cam_id].reshape((3, 3))
+        mujoco.mjv_updateScene(
+            self.model, self.data, mujoco.MjvOption(),
+            None, self.camera, mujoco.mjtCatBit.mjCAT_ALL, self.scene
+        )
+        mujoco.mjr_render(viewport, self.scene, self.context)
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        mujoco.mjr_readPixels(rgb, None, viewport, self.context)
+        cv_image = cv2.cvtColor(np.flipud(rgb), cv2.COLOR_RGB2BGR)
+        return cv_image
+    
+    # ========================= 双臂轨迹对齐 =========================
+    def _as_Nx7(self, seg, who):
+        arr = np.asarray(seg, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        # 可能有人返回 (7, N)
+        if arr.shape[0] == 7 and arr.shape[1] != 7:
+            arr = arr.T
+        if arr.shape[1] != 7:
+            raise RuntimeError(f"{who} segment must be (N,7), got {arr.shape}")
+        return arr
+
+    def _align_dual_arm_trajs(self, left_arm_full_traj, right_arm_full_traj):
+        """对左右臂多阶段轨迹进行阶段补齐、轨迹点数对齐"""
+        # 先都变成 Nx7
+        left_arm_full_traj  = [self._as_Nx7(s, "left")  for s in left_arm_full_traj]
+        right_arm_full_traj = [self._as_Nx7(s, "right") for s in right_arm_full_traj]
+
+        # ……下面保留你原来的阶段补齐&点数对齐逻辑……
+        len_left = len(left_arm_full_traj)
+        len_right = len(right_arm_full_traj)
+        if len_left < len_right and len_left > 0:
+            last_point = left_arm_full_traj[-1][-1]
+            for i in range(len_right - len_left):
+                pad_len = right_arm_full_traj[len_left + i].shape[0]
+                left_arm_full_traj.append(np.tile(last_point, (pad_len, 1)))
+        elif len_right < len_left and len_right > 0:
+            last_point = right_arm_full_traj[-1][-1]
+            for i in range(len_left - len_right):
+                pad_len = left_arm_full_traj[len_right + i].shape[0]
+                right_arm_full_traj.append(np.tile(last_point, (pad_len, 1)))
+
+        dual_arm_full_traj = []
+        for left_stage, right_stage in zip(left_arm_full_traj, right_arm_full_traj):
+            left_len = left_stage.shape[0]
+            right_len = right_stage.shape[0]
+            max_len = max(left_len, right_len)
+            if left_len < max_len:
+                left_stage = np.vstack([left_stage, np.repeat(left_stage[-1][np.newaxis, :], max_len - left_len, axis=0)])
+            if right_len < max_len:
+                right_stage = np.vstack([right_stage, np.repeat(right_stage[-1][np.newaxis, :], max_len - right_len, axis=0)])
+            # 拼成 14 列
+            combined_stage = np.hstack([left_stage, right_stage])
+            dual_arm_full_traj.append(combined_stage)
+
+        return np.vstack(dual_arm_full_traj) if dual_arm_full_traj else np.array([])
+    
+    def set_place_joint_targets(self, left_q=None, right_q=None):
+        """
+        在 run_before() 之前调用，用于告诉我二阶段的目标关节角（6个关节，不含夹爪）。
+        """
+        if left_q is not None:
+            self.left_place_q = np.asarray(left_q, dtype=float).reshape(6,)
+        if right_q is not None:
+            self.right_place_q = np.asarray(right_q, dtype=float).reshape(6,)
+
+    def _pad_with_gripper(self, q_traj, is_open):
+        """
+        q_traj: (N,6) 只含6个关节
+        返回:   (N,7) 在最后一列加夹爪目标（开=0.035 / 闭=0.0）
+        """
+        g = 0.035 if is_open else 0.0
+        gcol = np.full((q_traj.shape[0], 1), g, dtype=float)
+        return np.hstack([q_traj, gcol])
+    
+    # ========================= 关键修改：左右臂完整轨迹 =========================
+    def cal_left_arm_full_traj(self, first_stage_start_ee_pose, first_stage_start_base_link_pose,
+                           first_stage_start_link1_pose, first_stage_start_joint_pos,
+                           _unused1, _unused2, _unused3):
+        """
+        左臂:
+        阶段1 抓苹果:         plan_arm_traj + 关夹爪
+        阶段2 搬运至放置位:    RRT+Cubic (从阶段1末点到 预设的 left_place_q)，途中爪保持闭合
+                            到达后增加开夹爪的保持段
+        """
+        full_path = []
+        try:
+            # ---------- 阶段1：去抓苹果（IK路径，夹爪打开） ----------
+            obj_grasp_pos, obj_grasp_quat = self._get_obj_grasp_pose(self.apple_name)
+            grasp_pose = np.concatenate([obj_grasp_pos, obj_grasp_quat])
+
+            print(f"Left grasp pose: {grasp_pose}")
+
+            first_path = self._plan_arm_traj(
+                "apple",
+                grasp_pose,
+                first_stage_start_ee_pose,
+                first_stage_start_base_link_pose,
+                first_stage_start_link1_pose,
+                slerp_num=150,
+                cur_joint_pos=first_stage_start_joint_pos,
+                is_grasp_open=True
+            )
+            if first_path is None or len(first_path) == 0:
+                print("Left Stage1 plan failed")
+                return []
+
+            # 夹爪闭合保持
+            first_path_last_q = first_path[-1][:6]
+            first_path_grip_close = self._add_gripper_state(first_path_last_q, 40, is_grasp_open=False)
+
+            # ---------- 阶段2：RRT+Cubic 到预设“放置关节角”，途中爪保持闭合 ----------
+            if not hasattr(self, "left_place_q"):
+                print("[Left] place target q not set, call set_place_joint_targets(...) first.")
+                full_path.extend([first_path, first_path_grip_close])
+                return full_path
+
+            q_start = first_path_grip_close[-1][:6]   # 从阶段1（含关爪保持段）末点出发
+            q_goal  = self.left_place_q               # 你预先给定的6关节放置目标
+
+            q_rrt = self.calc_arm_rrt_cubic_traj(q_start, q_goal)
+            if q_rrt is None or len(q_rrt) == 0:
+                print("Left Stage2 RRT failed")
+                full_path.extend([first_path, first_path_grip_close])
+                return full_path
+
+            # RRT轨迹补夹爪（闭合）
+            second_path_joint7 = self._pad_with_gripper(q_rrt, is_open=False)
+
+            # 到达后开夹爪保持
+            last_q2 = second_path_joint7[-1][:6]
+            second_path_grip_open = self._add_gripper_state(last_q2, 20, is_grasp_open=True)
+
+            # 合并
+            full_path.extend([first_path, first_path_grip_close, second_path_joint7, second_path_grip_open])
+            return full_path
+
+        except Exception as e:
+            print(f"Error in left arm trajectory: {e}")
+            return []
+    
+    def cal_right_arm_full_traj(self, first_stage_start_ee_pose, first_stage_start_base_link_pose,
+                            first_stage_start_link1_pose, first_stage_start_joint_pos,
+                            _unused1, _unused2, _unused3):
+        """
+        右臂:
+        阶段1 抓香蕉:         plan_arm_traj + 关夹爪
+        阶段2 搬运至放置位:    RRT+Cubic 到预设 right_place_q，途中爪保持闭合
+                            到达后增加开夹爪的保持段
+        """
+        full_path = []
+        try:
+            # ---------- 阶段1 ----------
+            obj_grasp_pos, obj_grasp_quat = self._get_obj_grasp_pose(self.banana_name)
+            grasp_pose = np.concatenate([obj_grasp_pos, obj_grasp_quat])
+
+            first_path = self._plan_arm_traj(
+                "banana",
+                grasp_pose,
+                first_stage_start_ee_pose,
+                first_stage_start_base_link_pose,
+                first_stage_start_link1_pose,
+                slerp_num=150,
+                cur_joint_pos=first_stage_start_joint_pos,
+                is_grasp_open=True
+            )
+            if first_path is None or len(first_path) == 0:
+                print("Right Stage1 plan failed")
+                return []
+            
+            print(f"right first_path length: {len(first_path)}")
+
+            # 夹爪闭合保持
+            first_path_last_q = first_path[-1][:6]
+            first_path_grip_close = self._add_gripper_state(first_path_last_q, 40, is_grasp_open=False)
+
+            print(f"right first_path_grip_close length: {len(first_path_grip_close)}")
+
+            # ---------- 阶段2 ----------
+            if not hasattr(self, "right_place_q"):
+                print("[Right] place target q not set, call set_place_joint_targets(...) first.")
+                full_path.extend([first_path, first_path_grip_close])
+                return full_path
+
+            q_start = first_path_grip_close[-1][:6]
+            q_goal  = self.right_place_q
+
+            q_rrt = self.calc_arm_rrt_cubic_traj(q_start, q_goal)
+            if q_rrt is None or len(q_rrt) == 0:
+                print("Right Stage2 RRT failed")
+                full_path.extend([first_path, first_path_grip_close])
+                return full_path
+
+            second_path_joint7 = self._pad_with_gripper(q_rrt, is_open=False)
+
+            last_q2 = second_path_joint7[-1][:6]
+            second_path_grip_open = self._add_gripper_state(last_q2, 20, is_grasp_open=True)
+
+            full_path.extend([first_path, first_path_grip_close, second_path_joint7, second_path_grip_open])
+            for i, seg in enumerate(full_path, start=1):
+                try:
+                    print(f"Segment {i}: {len(seg)} waypoints")
+                except Exception:
+                    print(f"Segment {i}: type={type(seg)}")
+            return full_path
+
+        except Exception as e:
+            print(f"Error in right arm trajectory: {e}")
+            return []
+    
+    # ========================= 计算双臂协调轨迹 =========================
+    def cal_dual_arm_traj(self):
+        try:
+            # 左臂当前状态
+            left_ee_pos, left_ee_quat = self._get_site_pose("left_ee")
+            left_base_pos, left_base_quat = self._get_body_pose("left_base_link")
+            left_link1_pos, left_link1_quat = self._get_body_pose("left_link1")
+            left_ee_pose = np.concatenate([left_ee_pos, left_ee_quat])
+            left_base_pose = np.concatenate([left_base_pos, left_base_quat])
+            left_link1_pose = np.concatenate([left_link1_pos, left_link1_quat])
+            left_joint_pos = self._get_arm_joint_positions("left", 8)[:6]
+            
+            # 右臂当前状态
+            right_ee_pos, right_ee_quat = self._get_site_pose("right_ee")
+            right_base_pos, right_base_quat = self._get_body_pose("right_base_link")
+            right_link1_pos, right_link1_quat = self._get_body_pose("right_link1")
+            right_ee_pose = np.concatenate([right_ee_pos, right_ee_quat])
+            right_base_pose = np.concatenate([right_base_pos, right_base_quat])
+            right_link1_pose = np.concatenate([right_link1_pos, right_link1_quat])
+            right_joint_pos = self._get_arm_joint_positions("right", 8)[:6]
+
+            # 规划左臂
+            left_arm_full_traj = self.cal_left_arm_full_traj(
+                left_ee_pose, left_base_pose, left_link1_pose, left_joint_pos,
+                None, None, None
+            )
+            # 规划右臂
+            right_arm_full_traj = self.cal_right_arm_full_traj(
+                right_ee_pose, right_base_pose, right_link1_pose, right_joint_pos,
+                None, None, None
+            )
+            if not left_arm_full_traj or not right_arm_full_traj:
+                print("One arm failed to plan.")
+                return None
+            
+            path_total = self._align_dual_arm_trajs(left_arm_full_traj, right_arm_full_traj)
+            return path_total
+        except Exception as e:
+            print(f"Error in dual arm trajectory planning: {e}")
+            return None
+    
+    # ========================= 环境重置和运行 =========================
+    def reset_objects_random_position(
+        self,
+        obj_names,
+        margin=0.15,
+        min_sep=0.10,
+        z_offset=0.03,
+        keep_orientation=True,
+        corner_clearance=0.12,      # 角落避让半径
+        banana_edge_margin=0.10,    # 香蕉额外边缘留白（在 margin 基础上再加）
+        banana_board_clearance=0.05 # 香蕉额外远离板子的距离
+    ):
+        """
+        只重置指定物体到桌面上；若存在 board，则避免把物体放到 board 的占用区域内。
+        额外规则：
+        - 苹果只出现在桌子左半部分（y>0）
+        - 香蕉只出现在桌子右半部分（y<0），并且更远离桌边和 board
+        - 都不得出现在桌子的边边角角（四角有圆形禁区 + 四边留 margin）
+        """
+        try:
+            # 标准化传参
+            obj_list = [obj_names] if isinstance(obj_names, str) else list(obj_names)
+
+            # 桌面参数（与XML一致）
+            desk_pos, _ = self._get_body_pose("desk")  # [0.7, 0, 0.73]
+            half_x, half_y, half_z = 0.3, 0.6, 0.01115
+            table_top_z = desk_pos[2] + half_z
+
+            # board（可选）
+            board_exists = False
+            board_xy_half = (0.08357354000000003, 0.12273938750000006)
+            board_pad = 0.01
+            try:
+                board_pos, _ = self._get_body_pose("board")
+                board_exists = True
+            except Exception:
+                board_exists = False
+
+            # 基础可放置区域（四边留 margin）
+            x_min_base = desk_pos[0] - half_x + margin
+            x_max_base = desk_pos[0] + half_x - margin
+            y_min_base = desk_pos[1] - half_y + margin
+            y_max_base = desk_pos[1] + half_y - margin
+
+            # 角落禁区：四个角的圆形清除区中心
+            corners = [
+                (desk_pos[0] - half_x + margin, desk_pos[1] - half_y + margin),
+                (desk_pos[0] - half_x + margin, desk_pos[1] + half_y - margin),
+                (desk_pos[0] + half_x - margin, desk_pos[1] - half_y + margin),
+                (desk_pos[0] + half_x - margin, desk_pos[1] + half_y - margin),
+            ]
+
+            # 已放位置 & 当前姿态
+            placed_xy = {}
+            name2quat = {}
+            for name in obj_list:
+                _, q = self._get_body_pose(name)
+                name2quat[name] = q.copy()
+
+            def inside_board(x, y, extra=0.0):
+                if not board_exists:
+                    return False
+                bx, by = board_pos[0], board_pos[1]
+                hx = board_xy_half[0] + board_pad + extra
+                hy = board_xy_half[1] + board_pad + extra
+                return (abs(x - bx) <= hx) and (abs(y - by) <= hy)
+
+            def far_from_others(x, y):
+                for _, (ox, oy) in placed_xy.items():
+                    if ((x - ox) ** 2 + (y - oy) ** 2) ** 0.5 < min_sep:
+                        return False
+                return True
+
+            def away_from_corners(x, y):
+                for cx, cy in corners:
+                    if ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 < corner_clearance:
+                        return False
+                return True
+
+            # 逐个物体放置
+            for name in obj_list:
+                is_apple = "apple" in name.lower()
+                is_banana = "banana" in name.lower()
+
+                # x/y 采样范围：基础矩形范围
+                x_min, x_max = x_min_base, x_max_base
+                y_min, y_max = y_min_base, y_max_base
+
+                # 半区限制
+                if is_apple:
+                    # 左半边（y>0），稍微离 0 远一点，避免贴中线
+                    y_min = max(y_min, 0.10)
+                elif is_banana:
+                    # 右半边（y<0），离 0 更远 + 额外边缘收紧
+                    y_max = min(y_max, -0.10)
+                    # 再在四边基础 margin 上，加更大的留白
+                    x_min = x_min_base + banana_edge_margin
+                    x_max = x_max_base - banana_edge_margin
+                    y_min = y_min_base + banana_edge_margin
+                    y_max = y_max - banana_edge_margin  # y_max 已经是负数，这里再缩小绝对值
+
+                    # 防止范围被挤没了
+                    if x_min >= x_max or y_min >= y_max:
+                        raise RuntimeError("Banana sampling area collapsed; reduce banana_edge_margin or margin.")
+
+                attempts = 0
+                found = False
+                while attempts < 400:
+                    x = np.random.uniform(x_min, x_max)
+                    y = np.random.uniform(y_min, y_max)
+
+                    # 板子禁区：香蕉再加更大 clearance
+                    extra_board = banana_board_clearance if is_banana else 0.0
+                    if inside_board(x, y, extra=extra_board):
+                        attempts += 1
+                        continue
+
+                    # 角落禁区 + 物体间距
+                    if (not away_from_corners(x, y)) or (not far_from_others(x, y)):
+                        attempts += 1
+                        continue
+
+                    # 通过约束，设置姿态（保持原姿态 or 统一朝向）
+                    z = table_top_z + z_offset
+                    quat = name2quat[name] if keep_orientation else np.array([1.0, 0.0, 0.0, 0.0])
+
+                    self.set_goal_pose(name, np.array([x, y, z]), quat)
+                    placed_xy[name] = (x, y)
+                    found = True
+                    break
+
+                if not found:
+                    half_hint = "left half" if is_apple else ("right half (tighter)" if is_banana else "whole desk")
+                    raise RuntimeError(f"Failed to place '{name}' on the {half_hint} after many attempts.")
+
+            mujoco.mj_forward(self.model, self.data)
+
+            for k, (x, y) in placed_xy.items():
+                print(f"{k} placed at: [{x:.3f}, {y:.3f}, {table_top_z + z_offset:.3f}]")
+            return True
+
+        except Exception as e:
+            print(f"Error in resetting object positions: {e}")
+            return False
 
 
-            # 苹果不容易滑动，只用range3
-            if self.item_name == "apple":
-                integration_time = 10
-            # 香蕉容易滑动
-            if self.item_name == "banana":
-                integration_time = 25
+        
 
-            for i in range(integration_time):
-                target_joints_state_np = np.array([
-                    [target_joints_state[0], target_joints_state[1], target_joints_state[2],
-                     target_joints_state[3], target_joints_state[4], target_joints_state[5],
-                     0]])
-                path_total = np.vstack([path_total, target_joints_state_np])
-                # self.data.ctrl[:7] = target_joints_state_np
-                #
-                # mujoco.mj_step(self.model, self.data)
-                # # self._set_sim_data(target_joints_state_np)
-                # self.sync()
-                # time.sleep(0.002)
+    def _cache_mobile_base_handles(self):
+        """在 __init__ 里调用一次：缓存 mobile_ai 自由关节和四个轮子关节的地址/默认值"""
+        # 1) 根 body: mobile_ai（有 <freejoint/>）
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "mobile_ai")
+        if body_id == -1:
+            raise ValueError("Body 'mobile_ai' not found! 请确认 XML 名称一致。")
 
-        # TODO:调用RRT规划轨迹位姿，转回起始位姿最终理想关节角
-        target_joints_state_sta_end = np.array([0, 1.19, -0.661, 0, 0.781, 0]
-                                                    , dtype=float)
+        jadr = self.model.body_jntadr[body_id]
+        if jadr < 0:
+            raise ValueError("mobile_ai 没有关节，检查是否真的有 <freejoint/>")
 
-        for i in range(30):
-            path = self.calc_arm_rrt_cubic_traj(target_joints_state_np_sub, target_joints_state_sta_end)
-            if path is None:
-                self.count = self.count + 1
-                print(" planning path failed... ")
-                continue
-                # raise RuntimeError(" planning path failed... ")
+        root_jid = jadr  # 该 body 的第一个关节就是 freejoint
+        if self.model.jnt_type[root_jid] != mujoco.mjtJoint.mjJNT_FREE:
+            raise ValueError("mobile_ai 的第一个关节不是 freejoint，XML 结构可能改了。")
+
+        root_qposadr = self.model.jnt_qposadr[root_jid]  # 7 维 (x,y,z, qw,qx,qy,qz)
+        root_qveladr = self.model.jnt_dofadr[root_jid]   # 6 维自由度
+
+        # 缓存默认位姿（用模型加载后的初态作为“初始值”）
+        self._root_freejoint = {
+            "jid": root_jid,
+            "qposadr": root_qposadr,
+            "qveladr": root_qveladr,
+            "qpos0": self.data.qpos[root_qposadr:root_qposadr+7].copy(),  # (3 pos + 4 quat)
+        }
+
+        # 2) 四个轮子关节
+        wheel_joint_names = [
+            ("left_wheel_joint",  "hinge"),
+            ("right_wheel_joint", "hinge"),
+            ("front_wheel_joint", "ball"),
+            ("back_wheel_joint",  "ball"),
+        ]
+        self._wheel_joints = {}
+
+        for name, jtype in wheel_joint_names:
+            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if jid == -1:
+                raise ValueError(f"Joint '{name}' not found! 请确认名称与 XML 一致。")
+
+            qposadr = self.model.jnt_qposadr[jid]
+            dofadr  = self.model.jnt_dofadr[jid]
+            if jtype == "hinge":
+                qpos_dim = 1  # 角度
+                dof_dim  = 1
+            elif jtype == "ball":
+                qpos_dim = 4  # 四元数
+                dof_dim  = 3
             else:
-                break
+                raise ValueError(f"不支持的轮子关节类型: {jtype}")
 
-        index = 0
-        while True:
-            if index >= path.shape[1] - 1:
-                # self.cur_episode_done = True
-                break
+            self._wheel_joints[name] = {
+                "jid": jid,
+                "type": jtype,
+                "qposadr": qposadr,
+                "qveladr": dofadr,
+                "qpos_dim": qpos_dim,
+                "dof_dim": dof_dim,
+            }
 
-            # 苹果不容易滑动，只用range3
-            if self.item_name == "apple":
-                integration_time = 3
-            # 香蕉容易滑动
-            if self.item_name == "banana":
-                integration_time = 5
+    def _set_freejoint_pose(self, body_name: str, pos, quat_wxyz):
+        """按 body 的 freejoint 设置 3 平移 + 4 四元数（wxyz）"""
+        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if bid == -1:
+            raise ValueError(f"Body '{body_name}' not found!")
+        jadr = self.model.body_jntadr[bid]
+        if jadr < 0:
+            raise ValueError(f"Body '{body_name}' 没有关联关节。")
+        jid = jadr
+        if self.model.jnt_type[jid] != mujoco.mjtJoint.mjJNT_FREE:
+            raise ValueError(f"Body '{body_name}' 第一个关节不是 freejoint。")
 
-            for i in range(integration_time):
-                target_joints_state = path[:6, index]
-                target_joints_state_np = np.array([
-                    [target_joints_state[0], target_joints_state[1], target_joints_state[2],
-                     target_joints_state[3], target_joints_state[4], target_joints_state[5],
-                     0]])
-                path_total = np.vstack([path_total, target_joints_state_np])
-                # self.data.ctrl[:7] = target_joints_state_np
-                # mujoco.mj_step(self.model, self.data)
-                # # self._set_sim_data(target_joints_state_np)
-                # self.sync()
-                # time.sleep(0.002)
+        qposadr = self.model.jnt_qposadr[jid]
+        self.data.qpos[qposadr:qposadr+3] = np.asarray(pos, dtype=float)
+        self.data.qpos[qposadr+3:qposadr+7] = np.asarray(quat_wxyz, dtype=float)
 
-            index += 1
+    def reset_mobile_base_to_initial(self):
+        """
+        将 mobile_ai（freejoint）恢复到加载时的初始位姿；
+        将 4 个轮子关节恢复到 0（hinge=0, ball=单位四元数）；
+        并清零对应速度。
+        """
+        if not hasattr(self, "_root_freejoint") or not hasattr(self, "_wheel_joints"):
+            # 防呆：如果忘了调用缓存函数，就临时建一下
+            self._cache_mobile_base_handles()
 
-        # TODO:张开夹爪
-        for j in range(1000):
-            if j % 2 == 0:
-                continue
-            target_joints_state_np = np.array([[target_joints_state_sta_end[0], target_joints_state_sta_end[1],
-                                               target_joints_state_sta_end[2], target_joints_state_sta_end[3],
-                                               target_joints_state_sta_end[4], target_joints_state_sta_end[5],
-                                               (0.035 / 1000) * j]])
-            path_total = np.vstack([path_total, target_joints_state_np])
-            # self.data.ctrl[:7] = target_joints_state_np
-            # mujoco.mj_step(self.model, self.data)
-            # # self._set_sim_data(target_joints_state_np)
-            # self.sync()
-            # time.sleep(0.002)
+        # 1) 根 freejoint pose 恢复
+        root = self._root_freejoint
+        self.data.qpos[root["qposadr"]:root["qposadr"]+7] = root["qpos0"]
+        self.data.qvel[root["qveladr"]:root["qveladr"]+6] = 0.0
 
-        # TODO:等待1秒
-        for j in range(500):
-            target_joints_state_np = np.array([[target_joints_state_sta_end[0], target_joints_state_sta_end[1],
-                                               target_joints_state_sta_end[2], target_joints_state_sta_end[3],
-                                               target_joints_state_sta_end[4], target_joints_state_sta_end[5],
-                                               0.035 ]])
-            path_total = np.vstack([path_total, target_joints_state_np])
-            # self.data.ctrl[:7] = target_joints_state_np
-            # mujoco.mj_step(self.model, self.data)
-            # # self._set_sim_data(target_joints_state_np)
-            # self.sync()
-            # time.sleep(0.002)
+        # 2) 四个轮子置零
+        for name, meta in self._wheel_joints.items():
+            qa = meta["qposadr"]
+            da = meta["qveladr"]
+            if meta["type"] == "hinge":
+                self.data.qpos[qa] = 0.0
+                self.data.qvel[da] = 0.0
+            else:  # ball
+                # 单位四元数
+                self.data.qpos[qa:qa+4] = np.array([1.0, 0.0, 0.0, 0.0])
+                self.data.qvel[da:da+3] = 0.0
 
-        # 遍历每一列并进行平滑处理
-        for i in range(path_total.shape[1]):
-            # 应用平滑处理
-            path_total[:, i] = self.smooth_waveform(path_total[:, i])
-
-        # 绘制所有平滑后的波形并保存为一个 PNG 文件
-        plt.figure(figsize=(15, 8))  # 设置较大图像大小以便容纳所有波形
-        for i in range(path_total.shape[1]):
-            plt.plot(path_total[:, i], label=f'Smoothed Waveform {i + 1}')  # 绘制平滑后的波形
-
-        plt.title('Smoothed Combined Waveforms')  # 设置合并后的标题
-        plt.xlabel('Index')  # 设置 x 轴标签
-        plt.ylabel('Value')  # 设置 y 轴标签
-        plt.legend()  # 添加图例
-        plt.grid(True)  # 添加网格
-        plt.tight_layout()  # 自动调整子图参数，使之填充整个图表区域
-        plt.savefig('smoothed_combined_waveforms.png')  # 保存为 PNG 文件
-        plt.close()  # 关闭当前图像窗口
-
-
-        # # 遍历每一列，绘制并保存为 PNG 文件
-        # for i in range(path_total.shape[1]):
-        #     plt.figure(figsize=(10, 4))  # 设置图像大小
-        #     plt.plot(path_total[:, i], label=f'Waveform {i + 1}')  # 绘制第 i 列的波形
-        #     plt.title(f'Waveform {i + 1}')  # 设置标题
-        #     plt.xlabel('Index')  # 设置 x 轴标签
-        #     plt.ylabel('Value')  # 设置 y 轴标签
-        #     plt.legend()  # 添加图例
-        #     plt.grid(True)  # 添加网格
-        #     plt.savefig(f'waveform_{i + 1}.png')  # 保存为 PNG 文件
-        #     plt.close()  # 关闭当前图像窗口
-        #
-        # print("所有波形已保存为 PNG 文件。")
-        # 绘制所有波形并保存为一个 PNG 文件
-        plt.figure(figsize=(15, 8))  # 设置较大图像大小以便容纳所有波形
-        for i in range(path_total.shape[1]):
-            plt.plot(path_total[:, i], label=f'Waveform {i + 1}')  # 绘制所有列的波形
-
-        plt.title('Combined Waveforms')  # 设置合并后的标题
-        plt.xlabel('Index')  # 设置 x 轴标签
-        plt.ylabel('Value')  # 设置 y 轴标签
-        plt.legend()  # 添加图例
-        plt.grid(True)  # 添加网格
-        plt.tight_layout()  # 自动调整子图参数，使之填充整个图表区域
-        plt.savefig('combined_waveforms.png')  # 保存为 PNG 文件
-        plt.close()  # 关闭当前图像窗口
+        # 推前向
+        mujoco.mj_forward(self.model, self.data)
+        print("Mobile base reset: pose -> initial, wheels -> zero.")
+    
+    def _set_joint_positions_by_name(self, joint_names, joint_values, clamp_to_range=True):
+        """
+        根据关节名列表设置 qpos，支持范围裁剪。
+        joint_names: list[str]
+        joint_values: list[float] (同长度)
+        """
+        assert len(joint_names) == len(joint_values), "joint_names 和 joint_values 长度不一致"
+        for name, val in zip(joint_names, joint_values):
+            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if jid == -1:
+                raise ValueError(f"关节 '{name}' 未找到！")
+            qadr = self.model.jnt_qposadr[jid]
+            # 只处理一维（铰链/滑动），球关节/自由关节不在这儿用
+            if self.model.jnt_type[jid] in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+                v = float(val)
+                if clamp_to_range and self.model.jnt_limited[jid]:
+                    lo, hi = self.model.jnt_range[jid]
+                    v = max(min(v, hi), lo)
+                self.data.qpos[qadr] = v
+            else:
+                raise ValueError(f"关节 '{name}' 不是单自由度关节（类型={self.model.jnt_type[jid]}），不支持这里设置。")
 
 
-        # 调试：回放拼接waypoint的
-        for index in range(path_total.shape[0]):
-            # if index % 16 == 0 :
-            #     self.data.ctrl[:7] = path_total[index, :]
-            self.data.ctrl[:7] = path_total[index, :]
-            mujoco.mj_step(self.model, self.data)
-            self.sync()
-            time.sleep(0.002)
-        #
-        # time.sleep(300)
-        # -------------------------------对比实验： RRT成功率-------------------------------
-        # # step 4 : 调用IK求解关节角
-        # target_joints_state = self.inverse_kinematics(T_base_obj)
-        # target_joints_state_np = np.array(target_joints_state)
-        # print("q_goal:", target_joints_state)
-        #
-        # if target_joints_state is None:
-        #     self.count_ik = self.count_ik + 1
-        #     return
-        #
-        # # 调用RRT规划轨迹位姿，从初始位置0到预定义位姿
-        # path = self.calc_arm_rrt_cubic_traj(target_joints_state_sta1, target_joints_state_np)
-        #
-        # if path is None:
-        #     self.count = self.count + 1
-        #     return
-        #     # raise RuntimeError(" planning path failed... ")
-        #
-        # index = 0
-        #
-        # while True:
-        #     if index >= path.shape[1] - 1:
-        #         # self.cur_episode_done = True
-        #         break
-        #
-        #     self.data.qpos[:6] = path[:6, index]
-        #     self.data.qpos[6] = 0.035
-        #     self.data.qpos[7] = -0.035
-        #
-        #     mujoco.mj_step(self.model, self.data)
-        #     self.sync()
-        #     time.sleep(0.002)
-        #
-        #     index += 1  # 索引递增，准备下一帧
+    def reset_dual_arms_to_zero(self, left_init=None, right_init=None, default_gripper_open=0.035):
+        """
+            将左右臂关节设置为给定初始角度并前向更新。
+            - left_init/right_init: list/tuple，长度可为 6 或 8（单位：弧度/米，按模型定义）
+            * 长度 6：只给臂 1~6 关节；夹爪自动设为开口 [+g, -g]（左臂）/ [+g, -g]（右臂）
+            * 长度 8：包含指 7、8，完全按你给的值写
+            - default_gripper_open: 若只给 6 关节时，指7/8设为 +g / -g
+        """
+        try:
+            # 左臂目标
+            if left_init is None:
+                left_init = [0.0] * 6
+            left_init = list(left_init)
+            if len(left_init) == 6:
+                # 左指：left_joint7 ∈ [0, 0.035]，left_joint8 ∈ [-0.035, 0]
+                left_init += [default_gripper_open, -default_gripper_open]
+            elif len(left_init) != 8:
+                raise ValueError("left_init 必须是长度 6 或 8")
 
+            # 右臂目标
+            if right_init is None:
+                right_init = [0.0] * 6
+            right_init = list(right_init)
+            if len(right_init) == 6:
+                # 右指：right_joint7 ∈ [0, 0.035]，right_joint8 ∈ [-0.035, 0]
+                right_init += [default_gripper_open, -default_gripper_open]
+            elif len(right_init) != 8:
+                raise ValueError("right_init 必须是长度 6 或 8")
 
-    def run_loop(self):
+            # 写入左臂
+            left_joint_names = [f"left_joint{i}" for i in range(1, 9)]
+            self._set_joint_positions_by_name(left_joint_names, left_init, clamp_to_range=True)
+
+            # 写入右臂
+            right_joint_names = [f"right_joint{i}" for i in range(1, 9)]
+            self._set_joint_positions_by_name(right_joint_names, right_init, clamp_to_range=True)
+
+            # 清速度并前向
+            self.data.qvel[:] = 0
+            mujoco.mj_forward(self.model, self.data)
+
+            print("Dual arms reset to given initial joint angles.")
+            return True
+
+        except Exception as e:
+            print(f"Error in resetting dual arms: {e}")
+            return False
+    
+    def reset(self):
+
+        print("Resetting environment...")
+        left_home  = [0.0, 0.958, -0.485, 0.0, 0.0, 0.0, 0.035, -0.035]   # 8个：含夹爪
+        right_home = [0.0, 0.958, -0.485, 0.0, 0.0, 0.0, 0.035, -0.035]   # 8个：含夹爪
+        if not self.reset_dual_arms_to_zero(left_home, right_home):
+            return False
+        obj_names = ["apple", "banana"]
+        if not self.reset_objects_random_position(obj_names):
+            return False
+        self.handle.user_scn.ngeom = 0
+        mujoco.mj_forward(self.model, self.data)
+        self.sync()
+        time.sleep(0.1)
+        self.cur_episode_done = False
+        self.step_number = 0
+        self.goal_reached_count = 0
+        print("Environment reset complete")
+        return True
+    
+    def cal_dual_arm_traj_and_cache(self):
+        print("Planning dual arm trajectory...")
+        self.path_total = self.cal_dual_arm_traj()
+        if self.path_total is None or len(self.path_total) == 0:
+            print("Failed to plan dual arm trajectory")
+            return False
+        print(f"Successfully planned trajectory with {len(self.path_total)} waypoints")
+        return True
+
+    def run_before(self):
+        # 重置环境
+        if not self.reset():
+            return False
+        # 计算双臂轨迹并缓存
+        return self.cal_dual_arm_traj_and_cache()
+    
+    def run_loop(self, steps_per_waypoint=5, base_ctrl=(0.0, 0.0)):
+        """
+        - steps_per_waypoint: 每个轨迹点仿真步数
+        - base_ctrl: (v_left, v_right) 或者你底盘前两个控制量的期望值
+        """
+        if not hasattr(self, 'path_total') or self.path_total is None:
+            print("No trajectory available. Please call run_before() first.")
+            return False
+
+        if self.data.ctrl is None or self.data.ctrl.size < 16:
+            print(f"Unexpected ctrl size: {self.data.ctrl.size}, expect >= 16 (2 base + 14 arms).")
+            return False
+
+        print("Executing dual arm trajectory...")
         self.cur_episode_done = False
 
-        # 随机初始化目标位姿
-        self.reset()
+        try:
+            n = len(self.path_total)
+            for idx, waypoint in enumerate(self.path_total):
+                wp = np.asarray(waypoint, dtype=float).reshape(-1)
+                if wp.size < 14:
+                    print(f"Waypoint {idx} dim={wp.size} < 14, skip")
+                    continue
+                if not np.all(np.isfinite(wp[:14])):
+                    print(f"Waypoint {idx} contains NaN/Inf, skip")
+                    continue
 
-        # 求解规划位置的关节角,运动机械臂
-        self.run_before()
-        self.cur_episode_done = True
+                # 前2个控制量：底盘
+                self.data.ctrl[0] = float(base_ctrl[0])
+                self.data.ctrl[1] = float(base_ctrl[1])
+
+                # 后14个控制量：左臂7 + 右臂7
+                # 假设顺序就是你规划输出的顺序：left(7) + right(7)
+                self.data.ctrl[2:16] = wp[:14]
+
+                # 多步积分以执行该控制
+                for _ in range(int(steps_per_waypoint)):
+                    mujoco.mj_step(self.model, self.data)
+                    self.sync()
+                    time.sleep(0.002)
+
+                self.step_number += 1
+                if self.step_number % 100 == 0:
+                    print(f"Executed {self.step_number}/{n} waypoints")
+
+            self.cur_episode_done = True
+            print("Dual arm trajectory execution completed")
+            return True
+
+        except Exception as e:
+            print(f"Error during trajectory execution: {e}")
+            return False
+
+    
+    # ========================= 辅助和调试函数 =========================
+    def print_all_body_info(self):
+        print("\n=== Body 信息 ===")
+        print(f"{'Body Name':<25} {'Body ID':<8} {'Position':<30} {'Quaternion':<35}")
+        print("-" * 100)
+        for body_id in range(self.model.nbody):
+            try:
+                name_addr = self.model.name_bodyadr[body_id]
+                body_name = self.model.names[name_addr:].split(b'\x00')[0].decode('utf-8')
+                pos = self.data.body(body_id).xpos
+                quat = self.data.body(body_id).xquat
+                print(f"{body_name:<25} {body_id:<8} {str(pos):<30} {str(quat):<35}")
+            except Exception as e:
+                print(f"Error reading body {body_id}: {e}")
+    
+    def print_all_joint_info(self):
+        print("\n=== 关节信息 ===")
+        print(f"{'Joint Name':<20} {'Type':<15} {'Qpos Addr':<10} {'Range':<25} {'Current Value':<15}")
+        print("-" * 90)
+        for joint_id in range(self.model.njnt):
+            try:
+                name_addr = self.model.name_jntadr[joint_id]
+                joint_name = self.model.names[name_addr:].split(b'\x00')[0].decode('utf-8')
+                joint_type = self.model.jnt_type[joint_id]
+                type_names = {0: "自由关节(6DOF)", 1: "球关节(3DOF)", 2: "滑动关节", 3: "铰链关节"}
+                type_str = type_names.get(joint_type, "未知类型")
+                qpos_addr = self.model.jnt_qposadr[joint_id]
+                if self.model.jnt_limited[joint_id]:
+                    jnt_range = f"[{self.model.jnt_range[joint_id, 0]:.2f}, {self.model.jnt_range[joint_id, 1]:.2f}]"
+                else:
+                    jnt_range = "无限制"
+                if joint_type == 0:
+                    current_val = self.data.qpos[qpos_addr:qpos_addr + 7]
+                elif joint_type == 1:
+                    current_val = self.data.qpos[qpos_addr:qpos_addr + 4]
+                else:
+                    current_val = self.data.qpos[qpos_addr]
+                print(f"{joint_name:<20} {type_str:<15} {qpos_addr:<10} {jnt_range:<25} {str(current_val):<15}")
+            except Exception as e:
+                print(f"Error reading joint {joint_id}: {e}")
+    
+    def is_running(self):
+        return self.handle.is_running()
+    
+    def sync(self):
+        self.handle.sync()
+    
+    def close(self):
+        if hasattr(self, 'handle'):
+            self.handle.close()
+        if hasattr(self, 'window'):
+            glfw.destroy_window(self.window)
+        glfw.terminate()
+        print("Environment closed")

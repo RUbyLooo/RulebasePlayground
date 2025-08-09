@@ -15,7 +15,7 @@ from utils.mujoco_viewer import BaseViewer
 
 
 # class SingleArmEnv(BaseEnv):
-class SingleArmEnv(BaseViewer):
+class DualArmViewer(BaseViewer):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.path = cfg.path
@@ -26,47 +26,35 @@ class SingleArmEnv(BaseViewer):
     def unnormalizar_gripper(self,gripper_action ):
         return gripper_action * 0.035
 
-
-    # def run_func(self):
-    #     if self.q_vec is None:
-    #         raise ValueError(f" planning path does not exist... ")
-    #
-    #     # print(f"self.index : {self.index}")
-    #     # print(f"self.q_vec.shape[1] : {self.q_vec.shape[1]}")
-    #     # 控制
-    #     # self.data.ctrl[:6] = self.q_vec[:6, self.index]
-    #     self.data.qpos[:6] = self.q_vec
-    #     self.count = self.count + 1
-    #     if self.count > 10:
-    #         self.index += 1
-    #         self.count = 0
-    #     # if self.index >= self.q_vec.shape[1] - 1:
-    #     if self.index >= 1:
-    #         self.cur_episode_done = True
-    #         self.index = 0
-
-
 def main():
+    """主函数示例"""
+    # 配置参数
     cfg = EasyDict({
-        "path": "/home/ubuntu/mujoco_il_rl/model_assets/piper_on_desk/scene.xml",
+        "path": "/home/ubuntu/Documents/nn_coding/RulebasePlayground_nn/model_assets/mobile_ai_robot/scene.xml",
         "is_have_arm": True,
-        "episode_len": 20,
-        "is_save_record_data": True,
-        "camera_names": ["3rd_camera", "wrist_cam"],
-        "env_name": "SingleArmEnv",
-        "obj_list": ["desk","apple","banana"]
+        "episode_len": 100,
+        "is_save_record_data": False,
+        "camera_names": ["3rd", "wrist_cam_left", "wrist_cam_right"],
     })
-    env = SingleArmEnv(cfg)
-
-    # 记录数据
-    for i in range(cfg["episode_len"]):
-        print(f"iiii : {i}")
-        env.run_loop()
-
-    print("planning fail count:",env.count)
-    print("ik fail count:", env.count_ik)
-
-    env.mjstep_thread.join()
+    
+    # 创建环境
+    dual_arm_env = DualArmViewer(cfg)
+    
+    try:
+        for i in range(cfg["episode_len"]):
+            # 运行前准备（包含环境重置和轨迹规划）
+            if dual_arm_env.run_before():
+                # 执行双臂协调运动
+                dual_arm_env.run_loop()
+            else:
+                print("Failed to prepare for execution")
+            
+    except KeyboardInterrupt:
+        print("Interrupted by user")
+    except Exception as e:
+        print(f"Error in main execution: {e}")
+    finally:
+        dual_arm_env.close()
 
 
 if __name__ == "__main__":
