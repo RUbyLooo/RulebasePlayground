@@ -70,8 +70,8 @@ class BaseViewer:
         self.init_qpos = self.data.qpos.ravel().copy()
         self.init_qvel = self.data.qvel.ravel().copy()
 
-        self.left_place_q = np.array([-0.262, 1.24, -0.728, 0.0, 0.0, 0.0])
-        self.right_place_q = np.array([0.262, 1.24, -0.728, 0.0, 0.0, 0.0])
+        self.left_place_q = np.array([-0.262, 1.95, -1.79, -0.751, 0.537, 0.0])
+        self.right_place_q = np.array([0.262, 1.95, -1.79, 0.769, 0.537, 0.0])
         
         # 任务相关参数
         self.episode_len = cfg.get("episode_len", 1000)
@@ -99,7 +99,8 @@ class BaseViewer:
         
         # 物体和目标配置
         self.apple_name = "apple"
-        self.banana_name = "banana"
+        # self.banana_name = "banana"
+        self.banana_name = "hot_dog"
         # 这里可能是 "board" 或 "desk"，统一用函数取
         self.board_candidates = ["board", "desk", "tray", "basket"]
         
@@ -582,7 +583,10 @@ class BaseViewer:
             drop_lens = 15
 
         if item_name == "banana":
-            drop_lens = 0
+            drop_lens = 3
+
+        if item_name == "hot_dog":
+            drop_lens = 3
 
         for idx in range(len(quats_world_ee2obj)- drop_lens):
             quat_world_xyzw = np.roll(quats_world_ee2obj[idx], -1)
@@ -858,6 +862,7 @@ class BaseViewer:
         full_path = []
         try:
             # ---------- 阶段1 ----------
+            # 获得抓取site的pose
             obj_grasp_pos, obj_grasp_quat = self._get_obj_grasp_pose(self.banana_name)
             grasp_pose = np.concatenate([obj_grasp_pos, obj_grasp_quat])
 
@@ -1038,7 +1043,8 @@ class BaseViewer:
             # 逐个物体放置
             for name in obj_list:
                 is_apple = "apple" in name.lower()
-                is_banana = "banana" in name.lower()
+                # is_banana = "banana" in name.lower()
+                is_banana = "hot_dog" in name.lower()
 
                 # x/y 采样范围：基础矩形范围
                 x_min, x_max = x_min_base, x_max_base
@@ -1289,7 +1295,8 @@ class BaseViewer:
         right_home = [0.0, 0.958, -0.485, 0.0, 0.0, 0.0, 0.035, -0.035]   # 8个：含夹爪
         if not self.reset_dual_arms_to_zero(left_home, right_home):
             return False
-        obj_names = ["apple", "banana"]
+        # obj_names = ["apple", "banana"]
+        obj_names = ["apple", "hot_dog"]
         if not self.reset_objects_random_position(obj_names):
             return False
         self.handle.user_scn.ngeom = 0
@@ -1426,3 +1433,4 @@ class BaseViewer:
             glfw.destroy_window(self.window)
         glfw.terminate()
         print("Environment closed")
+

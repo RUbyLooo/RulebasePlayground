@@ -30,7 +30,7 @@ def main():
     """主函数示例"""
     # 配置参数
     cfg = EasyDict({
-        "path": "/home/ubuntu/Documents/nn_coding/RulebasePlayground_nn/model_assets/mobile_ai_robot/scene.xml",
+        "path": "/home/ubuntu/RB's playground/mb_RulebasePlayground/model_assets/mobile_ai_robot/scene.xml",
         "is_have_arm": True,
         "episode_len": 100,
         "is_save_record_data": False,
