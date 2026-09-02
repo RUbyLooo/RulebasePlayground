@@ -1,4 +1,3 @@
-import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 import copy
 # import pygpg
@@ -47,8 +46,11 @@ class SingleArmEnv(BaseViewer):
 
 
 def main():
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    model_path = os.path.abspath(os.path.join(script_dir, '../..', 'model_assets', 'piper_on_desk', 'scene.xml'))
+
     cfg = EasyDict({
-        "path": "/home/ubuntu/mujoco_il_rl/model_assets/piper_on_desk/scene.xml",
+        "path": model_path,
         "is_have_arm": True,
         "episode_len": 20,
         "is_save_record_data": True,

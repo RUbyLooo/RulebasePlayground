@@ -105,7 +105,6 @@ class BaseViewer:
         self.path = cfg.path
 
         if (cfg["is_have_arm"] == True):
-            self.my_chain = ikpy.chain.Chain.from_urdf_file("/home/ubuntu/piper_rrt_cubic/assets/piper_n.urdf")
             # 创建机械臂规划模型
             self.model_roboplan, self.collision_model, visual_model = load_models(use_sphere_collisions=True)
             if self.collision_model is None:
